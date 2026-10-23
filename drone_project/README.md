@@ -4,6 +4,14 @@ ROS 2 interface that publishes PX4 state at 10 Hz and provides guarded mode,
 arm, disarm, and preflight-check commands. Success requires both a terminal
 PX4 `ACCEPTED` acknowledgment and fresh telemetry confirming the result.
 
+The [safety_monitor](safety_monitor/README.md) package adds a separate C++ node
+that publishes phase-aware permissions on `/drone/safety_status` at 10 Hz.
+Build both with `colcon build --packages-up-to safety_monitor`, source the
+overlay, and run `ros2 launch safety_monitor safety.launch.py`. It requires fresh
+PX4 failsafe flags and land detection in addition to the existing telemetry.
+Rebuild all `DroneState` consumers after updating this branch. Visual landing
+remains blocked pending AprilTag and landing-envelope integration.
+
 ## Structure
 
 ```text
@@ -142,6 +150,7 @@ the response's `request_id` correlates ROS requests, not the PX4 wire protocol.
 | --- | --- | --- |
 | In | `/fmu/out/vehicle_status_v4` | `VehicleStatus` |
 | In | `/fmu/out/vehicle_land_detected` | `VehicleLandDetected` |
+| In | `/fmu/out/failsafe_flags` | `FailsafeFlags` |
 | In | `/fmu/out/vehicle_local_position_v1` | `VehicleLocalPosition` |
 | In | `/fmu/out/vehicle_odometry` | `VehicleOdometry` |
 | In | `/fmu/out/battery_status_v1` | `BatteryStatus` |

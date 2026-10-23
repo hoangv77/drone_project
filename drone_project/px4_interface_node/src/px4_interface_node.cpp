@@ -9,6 +9,7 @@
 
 // PX4 telemetry and command messages.
 #include <px4_msgs/msg/battery_status.hpp>
+#include <px4_msgs/msg/failsafe_flags.hpp>
 #if __has_include(<px4_msgs/msg/sensor_gps.hpp>)
 #include <px4_msgs/msg/sensor_gps.hpp>
 #else
@@ -122,6 +123,14 @@ public:
                     &Px4InterfaceNode::battery_callback,
                     this,
                     std::placeholders::_1));
+
+        failsafe_subscription_ = create_subscription<px4_msgs::msg::FailsafeFlags>(
+            "/fmu/out/failsafe_flags", px4_qos,
+            [this](px4_msgs::msg::FailsafeFlags::SharedPtr msg) {
+                failsafe_flags_ = *msg;
+                has_failsafe_flags_ = true;
+                last_failsafe_flags_rx_ = std::chrono::steady_clock::now();
+            });
 
         // This is the clean topic consumed by nodes we control. A depth of 10
         // means DDS may queue up to ten outgoing samples for a slow subscriber.
@@ -489,7 +498,8 @@ private:
         // These flags come from PX4's estimator. Freshness is added later in
         // publish_state() so estimator validity and communication validity stay
         // conceptually separate.
-        position_valid_ = msg->xy_valid && msg->z_valid;
+        position_valid_ = msg->xy_valid && msg->z_valid &&
+            std::isfinite(msg->x) && std::isfinite(msg->y) && std::isfinite(msg->z);
         velocity_valid_ = msg->v_xy_valid && msg->v_z_valid;
 
         // VehicleLocalPosition is our single source of translational state.
@@ -547,6 +557,8 @@ private:
         battery_remaining_ = valid_remaining
             ? msg->remaining
             : std::numeric_limits<float>::quiet_NaN();
+        battery_warning_ = msg->warning;
+        battery_fault_ = msg->faults != 0 || msg->is_powering_off;
 
         last_battery_rx_ = std::chrono::steady_clock::now();
         has_battery_ = true;
@@ -583,7 +595,7 @@ private:
         state.nav_state_user_intention = nav_state_user_intention_;
         state.failsafe = failsafe_;
         state.pre_flight_checks_pass = pre_flight_checks_pass_;
-        state.gcs_connection_lost = gcs_connection_lost_;
+        state.gcs_connection_lost = gcs_connection_lost_ || failsafe_flags_.gcs_connection_lost;
         state.safety_off = safety_off_;
         state.calibration_enabled = calibration_enabled_;
         state.system_id = has_status_ ? target_system_ : 0;
@@ -619,6 +631,26 @@ private:
         state.gps_fresh = gps_fresh;
         state.battery_fresh = battery_fresh;
 
+        state.failsafe_flags_fresh = is_fresh(
+            has_failsafe_flags_, last_failsafe_flags_rx_, slow_data_timeout_, steady_now);
+        state.manual_control_signal_lost = failsafe_flags_.manual_control_signal_lost;
+        state.offboard_control_signal_lost = failsafe_flags_.offboard_control_signal_lost;
+        state.local_position_invalid = failsafe_flags_.local_position_invalid;
+        state.local_velocity_invalid = failsafe_flags_.local_velocity_invalid;
+        state.global_position_invalid = failsafe_flags_.global_position_invalid;
+        state.home_position_invalid = failsafe_flags_.home_position_invalid;
+        state.battery_unhealthy = failsafe_flags_.battery_unhealthy || battery_fault_;
+        state.battery_low_remaining_time = failsafe_flags_.battery_low_remaining_time;
+        state.critical_failure = failsafe_flags_.angular_velocity_invalid ||
+            failsafe_flags_.attitude_invalid || failsafe_flags_.fd_critical_failure ||
+            failsafe_flags_.fd_esc_arming_failure || failsafe_flags_.fd_motor_failure;
+        state.geofence_breached = failsafe_flags_.geofence_breached;
+        state.mission_failure = failsafe_flags_.mission_failure;
+        // Preserve both sources. The consumer evaluates each warning explicitly;
+        // CHARGING (7) is not a more severe low-battery alarm.
+        state.battery_warning = battery_warning_;
+        state.failsafe_battery_warning = failsafe_flags_.battery_warning;
+
         // Hand the fully assembled message to ROS 2/DDS for delivery.
         state_publisher_->publish(state);
     }
@@ -634,6 +666,12 @@ private:
         gps_subscription_;
     rclcpp::Subscription<px4_msgs::msg::BatteryStatus>::SharedPtr
         battery_subscription_;
+    rclcpp::Subscription<px4_msgs::msg::FailsafeFlags>::SharedPtr failsafe_subscription_;
+    px4_msgs::msg::FailsafeFlags failsafe_flags_{};
+    uint8_t battery_warning_{0};
+    bool battery_fault_{false};
+    bool has_failsafe_flags_{false};
+    SteadyTimePoint last_failsafe_flags_rx_{};
 
     // Clean output publisher and its periodic trigger.
     rclcpp::Publisher<px4_interface_node::msg::DroneState>::SharedPtr

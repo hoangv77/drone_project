@@ -1,4 +1,4 @@
-# Colcon output when invoked at the repository root.
-/log/
+# Colcon output when invoked from the repository root.
 /build/
 /install/
+/log/

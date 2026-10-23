@@ -49,7 +49,8 @@ def generate_test_description():
         '/fmu/out/vehicle_status_v4', '/fmu/out/vehicle_local_position_v1',
         '/fmu/out/vehicle_odometry', '/fmu/out/vehicle_gps_position',
         '/fmu/out/vehicle_gnss',
-        '/fmu/out/vehicle_land_detected', '/drone/execute_command',
+        '/fmu/out/vehicle_land_detected', '/fmu/out/failsafe_flags',
+        '/drone/execute_command',
         '/fmu/out/battery_status_v1', '/fmu/out/vehicle_command_ack_v1',
         '/fmu/in/vehicle_command', '/drone/state', '/drone/set_flight_mode',
     ]

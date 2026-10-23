@@ -1,0 +1,11 @@
+safety_monitor:
+  ros__parameters:
+    state_timeout_ms: 500
+    battery_min_launch: 0.30
+    battery_min_flight: 0.20
+    battery_emergency: 0.10
+    require_gcs: true
+    require_rc: true
+    require_gnss: true
+    launch_modes: [LOITER, POSITION]
+    autonomous_modes: [LOITER, MISSION, OFFBOARD, RTL, TAKEOFF, LAND]
