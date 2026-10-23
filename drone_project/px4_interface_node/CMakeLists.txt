@@ -29,6 +29,7 @@ find_package(rosidl_typesupport_cpp REQUIRED)
 rosidl_generate_interfaces(${PROJECT_NAME}
   "msg/DroneState.msg"
   "srv/SetFlightMode.srv"
+  "srv/ExecuteCommand.srv"
   DEPENDENCIES builtin_interfaces
 )
 

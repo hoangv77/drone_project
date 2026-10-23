@@ -59,6 +59,7 @@ def main():
                 str(interface_bin), '--ros-args', '-r', '__node:=safety_sitl_interface',
                 '-r', '/drone/state:=' + prefix + '/state',
                 '-r', '/drone/set_flight_mode:=' + prefix + '/set_flight_mode',
+                '-r', '/drone/execute_command:=' + prefix + '/execute_command',
                 '-r', '/fmu/in/vehicle_command:=' + prefix + '/unused_command',
                 '-p', 'source_component:=193',
             ], stdout=logs, stderr=logs)

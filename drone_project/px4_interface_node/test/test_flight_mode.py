@@ -16,8 +16,8 @@ from rclpy.qos import qos_profile_sensor_data
 from rcl_interfaces.srv import SetParameters
 
 from px4_interface_node.msg import DroneState
-from px4_interface_node.srv import SetFlightMode
-from px4_msgs.msg import VehicleCommand, VehicleCommandAck, VehicleStatus
+from px4_interface_node.srv import ExecuteCommand, SetFlightMode
+from px4_msgs.msg import VehicleCommand, VehicleCommandAck, VehicleLandDetected, VehicleStatus
 try:
     from px4_msgs.msg import SensorGps as GpsMessage
     LEGACY_GPS = True
@@ -32,10 +32,14 @@ ACK = PREFIX + '/fmu/out/vehicle_command_ack_v1'
 COMMAND = PREFIX + '/fmu/in/vehicle_command'
 STATE = PREFIX + '/drone/state'
 SERVICE = PREFIX + '/drone/set_flight_mode'
+COMMAND_SERVICE = PREFIX + '/drone/execute_command'
+LAND = PREFIX + '/fmu/out/vehicle_land_detected'
 GPS = PREFIX + ('/fmu/out/vehicle_gps_position' if LEGACY_GPS else '/fmu/out/vehicle_gnss')
 R = SetFlightMode.Response
 A = VehicleCommandAck
 V = VehicleStatus
+E = ExecuteCommand.Response
+Q = ExecuteCommand.Request
 
 
 @pytest.mark.launch_test
@@ -46,6 +50,7 @@ def generate_test_description():
         '/fmu/out/vehicle_odometry', '/fmu/out/vehicle_gps_position',
         '/fmu/out/vehicle_gnss',
         '/fmu/out/vehicle_land_detected', '/fmu/out/failsafe_flags',
+        '/drone/execute_command',
         '/fmu/out/battery_status_v1', '/fmu/out/vehicle_command_ack_v1',
         '/fmu/in/vehicle_command', '/drone/state', '/drone/set_flight_mode',
     ]
@@ -71,6 +76,8 @@ class TestFlightMode(unittest.TestCase):
         rclpy.init()
         cls.node = rclpy.create_node('flight_mode_test_client')
         cls.client = cls.node.create_client(SetFlightMode, SERVICE)
+        cls.command_client = cls.node.create_client(ExecuteCommand, COMMAND_SERVICE)
+        cls.land_pub = cls.node.create_publisher(VehicleLandDetected, LAND, qos_profile_sensor_data)
         cls.status_pub = cls.node.create_publisher(V, STATUS, qos_profile_sensor_data)
         cls.ack_pub = cls.node.create_publisher(A, ACK, qos_profile_sensor_data)
         cls.gps_pub = cls.node.create_publisher(GpsMessage, GPS, qos_profile_sensor_data)
@@ -82,13 +89,25 @@ class TestFlightMode(unittest.TestCase):
             DroneState, STATE, cls.states.append, 10)
         cls.status_enabled = False
         cls.status_mode = V.NAVIGATION_STATE_MANUAL
+        cls.status_armed = False
+        cls.status_intention = None
+        cls.preflight = True
+        cls.gcs_lost = False
+        cls.failsafe = False
+        cls.safety_off = True
+        cls.calibration = False
+        cls.landed = True
+        cls.land_enabled = True
+        # Mock PX4 is driven by elapsed time, not adjustable WSL/ROS wall time.
         cls.timer = cls.node.create_timer(
             0.03, cls.status_tick, clock=Clock(clock_type=ClockType.STEADY_TIME))
         assert cls.client.wait_for_service(timeout_sec=10.0)
+        assert cls.command_client.wait_for_service(timeout_sec=10.0)
         deadline = time.monotonic() + 10.0
         while (cls.status_pub.get_subscription_count() == 0 or
                cls.ack_pub.get_subscription_count() == 0 or
                cls.gps_pub.get_subscription_count() == 0 or
+               cls.land_pub.get_subscription_count() == 0 or
                cls.node.count_publishers(COMMAND) == 0):
             assert time.monotonic() < deadline, 'DDS discovery timed out'
             rclpy.spin_once(cls.node, timeout_sec=0.05)
@@ -101,6 +120,15 @@ class TestFlightMode(unittest.TestCase):
     def setUp(self):
         type(self).status_enabled = False
         type(self).status_mode = V.NAVIGATION_STATE_MANUAL
+        type(self).status_armed = False
+        type(self).status_intention = None
+        type(self).preflight = True
+        type(self).gcs_lost = False
+        type(self).failsafe = False
+        type(self).safety_off = True
+        type(self).calibration = False
+        type(self).landed = True
+        type(self).land_enabled = True
 
     @staticmethod
     def px4_time():
@@ -113,12 +141,24 @@ class TestFlightMode(unittest.TestCase):
         msg.nav_state = mode
         msg.system_id = system
         msg.component_id = component
+        msg.arming_state = V.ARMING_STATE_ARMED if cls.status_armed else V.ARMING_STATE_DISARMED
+        msg.nav_state_user_intention = mode if cls.status_intention is None else cls.status_intention
+        msg.pre_flight_checks_pass = cls.preflight
+        msg.gcs_connection_lost = cls.gcs_lost
+        msg.failsafe = cls.failsafe
+        msg.safety_off = cls.safety_off
+        msg.calibration_enabled = cls.calibration
         cls.status_pub.publish(msg)
 
     @classmethod
     def status_tick(cls):
         if cls.status_enabled:
             cls.publish_status(cls.status_mode)
+            if cls.land_enabled:
+                msg = VehicleLandDetected()
+                msg.timestamp = cls.px4_time()
+                msg.landed = cls.landed
+                cls.land_pub.publish(msg)
 
     def spin_for(self, seconds):
         deadline = time.monotonic() + seconds
@@ -137,7 +177,17 @@ class TestFlightMode(unittest.TestCase):
         type(self).status_enabled = True
         expected_mode = 'LOITER' if mode == V.NAVIGATION_STATE_AUTO_LOITER else 'MANUAL'
         self.until(lambda: len(self.states) > count and self.states[-1].status_fresh and
-                   self.states[-1].flight_mode == expected_mode)
+                   self.states[-1].flight_mode == expected_mode and
+                   self.states[-1].armed == self.status_armed and
+                   self.states[-1].pre_flight_checks_pass == self.preflight and
+                   self.states[-1].gcs_connection_lost == self.gcs_lost and
+                   self.states[-1].failsafe == self.failsafe and
+                   self.states[-1].safety_off == self.safety_off and
+                   self.states[-1].calibration_enabled == self.calibration and
+                   self.states[-1].nav_state_user_intention ==
+                   (mode if self.status_intention is None else self.status_intention) and
+                   (not self.land_enabled or (self.states[-1].land_detected_fresh and
+                                              self.states[-1].landed == self.landed)))
 
     def request(self, mode='LOITER', expect_command=True):
         count = len(self.commands)
@@ -156,6 +206,13 @@ class TestFlightMode(unittest.TestCase):
         for key, value in overrides.items():
             setattr(msg, key, value)
         self.ack_pub.publish(msg)
+
+    def execute(self, kind, mode='', expect_command=True):
+        count = len(self.commands)
+        future = self.command_client.call_async(Q(command=kind, mode=mode))
+        if expect_command:
+            self.until(lambda: len(self.commands) > count)
+        return future
 
     def response(self, future, result, accepted=False, ack_result=R.NO_ACK):
         self.until(future.done)
@@ -411,6 +468,183 @@ class TestFlightMode(unittest.TestCase):
         receiver.fix_type = 2
         self.gps_pub.publish(gps)
         self.until(lambda: not self.states[-1].gps_valid and self.states[-1].gps_fresh)
+
+    def test_20_arm_preconditions_block_publication(self):
+        for field, value, result in [
+            ('preflight', False, E.PREFLIGHT_FAILED),
+            ('gcs_lost', True, E.GCS_UNAVAILABLE),
+            ('failsafe', True, E.FAILSAFE_ACTIVE),
+            ('safety_off', False, E.PREFLIGHT_FAILED),
+            ('calibration', True, E.PREFLIGHT_FAILED),
+            ('landed', False, E.PREFLIGHT_FAILED),
+        ]:
+            with self.subTest(field=field):
+                setattr(type(self), field, value)
+                self.prepare_status()
+                self.spin_for(0.05)
+                count = len(self.commands)
+                self.response(self.execute(Q.ARM, expect_command=False), result)
+                self.assertEqual(len(self.commands), count)
+                setattr(type(self), field, not value)
+
+    def test_21_arm_requires_ack_and_armed_telemetry(self):
+        self.prepare_status()
+        self.until(lambda: self.states[-1].ready_to_arm)
+        future = self.execute(Q.ARM)
+        command = self.commands[-1]
+        self.assertEqual(command.command, VehicleCommand.VEHICLE_CMD_COMPONENT_ARM_DISARM)
+        self.assertEqual((command.param1, command.param2), (1.0, 0.0))
+        self.ack(command=command.command)
+        self.spin_for(0.1)
+        self.assertFalse(future.done())
+        type(self).status_armed = True
+        response = self.response(future, E.SUCCESS, True, A.VEHICLE_CMD_RESULT_ACCEPTED)
+        self.assertTrue(response.armed)
+        self.assertEqual(response.command, Q.ARM)
+        self.assertGreater(response.request_id, 0)
+
+    def test_22_disarm_requires_ack_and_disarmed_telemetry(self):
+        type(self).status_armed = True
+        self.prepare_status()
+        future = self.execute(Q.DISARM)
+        command = self.commands[-1]
+        self.assertEqual((command.command, command.param1, command.param2),
+                         (VehicleCommand.VEHICLE_CMD_COMPONENT_ARM_DISARM, 0.0, 0.0))
+        self.ack(command=command.command)
+        self.spin_for(0.1)
+        self.assertFalse(future.done())
+        type(self).status_armed = False
+        response = self.response(future, E.SUCCESS, True, A.VEHICLE_CMD_RESULT_ACCEPTED)
+        self.assertFalse(response.armed)
+
+    def test_23_airborne_disarm_is_blocked(self):
+        type(self).landed = False
+        type(self).status_armed = True
+        self.prepare_status()
+        self.spin_for(0.05)
+        count = len(self.commands)
+        self.response(self.execute(Q.DISARM, expect_command=False), E.UNSAFE_DISARM)
+        self.assertEqual(len(self.commands), count)
+
+    def test_24_stale_land_detection_blocks_arm_and_disarm(self):
+        self.prepare_status()
+        type(self).land_enabled = False
+        self.spin_for(2.2)
+        for kind in [Q.ARM, Q.DISARM]:
+            self.response(self.execute(kind, expect_command=False), E.LANDED_UNAVAILABLE)
+        self.assertFalse(self.states[-1].ready_to_arm)
+
+    def test_25_armed_state_without_ack_is_not_success(self):
+        self.prepare_status()
+        future = self.execute(Q.ARM)
+        type(self).status_armed = True
+        self.response(future, E.ACK_TIMEOUT)
+
+    def test_26_disarm_ack_without_transition_times_out(self):
+        type(self).status_armed = True
+        self.prepare_status()
+        future = self.execute(Q.DISARM)
+        self.ack(command=VehicleCommand.VEHICLE_CMD_COMPONENT_ARM_DISARM)
+        self.response(future, E.TRANSITION_TIMEOUT, True, A.VEHICLE_CMD_RESULT_ACCEPTED)
+
+    def test_27_services_share_one_pending_command(self):
+        self.prepare_status()
+        first = self.request()
+        count = len(self.commands)
+        self.response(self.execute(Q.ARM, expect_command=False), E.BUSY)
+        self.assertEqual(len(self.commands), count)
+        self.ack()
+        type(self).status_mode = V.NAVIGATION_STATE_AUTO_LOITER
+        self.response(first, E.SUCCESS, True, A.VEHICLE_CMD_RESULT_ACCEPTED)
+
+    def test_28_arm_ignores_mode_ack_and_preserves_denial_details(self):
+        self.prepare_status()
+        future = self.execute(Q.ARM)
+        self.ack()
+        self.spin_for(0.1)
+        self.assertFalse(future.done())
+        self.ack(A.VEHICLE_CMD_RESULT_DENIED,
+                 command=VehicleCommand.VEHICLE_CMD_COMPONENT_ARM_DISARM,
+                 result_param1=17, result_param2=23)
+        response = self.response(future, E.REJECTED, ack_result=A.VEHICLE_CMD_RESULT_DENIED)
+        self.assertEqual((response.ack_result_param1, response.ack_result_param2), (17, 23))
+
+    def test_29_preflight_check_reports_actual_outcome(self):
+        for passed in [False, True]:
+            with self.subTest(passed=passed):
+                type(self).preflight = passed
+                self.prepare_status()
+                future = self.execute(Q.RUN_PREFLIGHT_CHECKS)
+                self.assertEqual(self.commands[-1].command, VehicleCommand.VEHICLE_CMD_RUN_PREARM_CHECKS)
+                self.ack(command=VehicleCommand.VEHICLE_CMD_RUN_PREARM_CHECKS)
+                self.response(future, E.SUCCESS if passed else E.PREFLIGHT_FAILED,
+                              True, A.VEHICLE_CMD_RESULT_ACCEPTED)
+
+    def test_30_invalid_commands_are_not_published(self):
+        self.prepare_status()
+        count = len(self.commands)
+        for kind, mode in [(200, ''), (Q.SET_MODE, ''), (Q.ARM, 'LOITER'), (Q.DISARM, 'force')]:
+            self.response(self.execute(kind, mode, expect_command=False), E.INVALID_REQUEST)
+        self.assertEqual(len(self.commands), count)
+
+    def test_31_failsafe_allows_only_recovery_modes(self):
+        type(self).failsafe = True
+        self.prepare_status()
+        self.response(self.execute(Q.SET_MODE, 'LOITER', expect_command=False), E.FAILSAFE_ACTIVE)
+        future = self.execute(Q.SET_MODE, 'LAND')
+        self.ack()
+        type(self).status_mode = V.NAVIGATION_STATE_AUTO_LAND
+        self.response(future, E.SUCCESS, True, A.VEHICLE_CMD_RESULT_ACCEPTED)
+
+    def test_32_status_loss_during_transition_is_reported(self):
+        self.prepare_status()
+        type(self).status_enabled = False
+        self.spin_for(1.7)
+        future = self.request()
+        self.ack()
+        response = self.response(future, E.STATUS_UNAVAILABLE, True, A.VEHICLE_CMD_RESULT_ACCEPTED)
+        self.assertFalse(response.status_fresh)
+
+    def test_33_command_relevant_state_is_exposed(self):
+        self.prepare_status()
+        self.until(lambda: self.states[-1].ready_to_arm)
+        state = self.states[-1]
+        self.assertTrue(state.pre_flight_checks_pass)
+        self.assertFalse(state.gcs_connection_lost)
+        self.assertFalse(state.failsafe)
+        self.assertTrue(state.landed and state.land_detected_fresh)
+        self.assertEqual((state.system_id, state.component_id), (7, 1))
+        self.assertEqual(state.arming_state, V.ARMING_STATE_DISARMED)
+        type(self).gcs_lost = True
+        self.until(lambda: self.states[-1].gcs_connection_lost)
+        self.assertFalse(self.states[-1].ready_to_arm)
+        self.assertIn('ground-control', self.states[-1].arming_block_reason)
+
+    def test_34_late_arm_ack_cannot_complete_disarm(self):
+        self.prepare_status()
+        arm = self.execute(Q.ARM)
+        old_timestamp = self.px4_time()
+        self.ack(command=VehicleCommand.VEHICLE_CMD_COMPONENT_ARM_DISARM, timestamp=old_timestamp)
+        type(self).status_armed = True
+        armed_result = self.response(arm, E.SUCCESS, True, A.VEHICLE_CMD_RESULT_ACCEPTED)
+        self.prepare_status()
+        disarm = self.execute(Q.DISARM)
+        type(self).status_armed = False
+        self.ack(command=VehicleCommand.VEHICLE_CMD_COMPONENT_ARM_DISARM, timestamp=old_timestamp)
+        self.spin_for(0.1)
+        self.assertFalse(disarm.done())
+        self.ack(command=VehicleCommand.VEHICLE_CMD_COMPONENT_ARM_DISARM)
+        disarmed_result = self.response(disarm, E.SUCCESS, True, A.VEHICLE_CMD_RESULT_ACCEPTED)
+        self.assertGreater(disarmed_result.request_id, armed_result.request_id)
+
+    def test_35_user_intention_does_not_confirm_active_mode(self):
+        type(self).status_intention = V.NAVIGATION_STATE_AUTO_LOITER
+        self.prepare_status()
+        self.assertEqual(self.states[-1].nav_state_user_intention, V.NAVIGATION_STATE_AUTO_LOITER)
+        self.assertEqual(self.states[-1].flight_mode, 'MANUAL')
+        future = self.request()
+        self.ack()
+        self.response(future, E.TRANSITION_TIMEOUT, True, A.VEHICLE_CMD_RESULT_ACCEPTED)
 
 
 @launch_testing.post_shutdown_test()

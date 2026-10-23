@@ -1,7 +1,8 @@
 # drone_project
 
-ROS 2 interface that publishes PX4 telemetry on `/drone/state` at 10 Hz and
-handles verified flight-mode changes through `/drone/set_flight_mode`.
+ROS 2 interface that publishes PX4 state at 10 Hz and provides guarded mode,
+arm, disarm, and preflight-check commands. Success requires both a terminal
+PX4 `ACCEPTED` acknowledgment and fresh telemetry confirming the result.
 
 The [safety_monitor](safety_monitor/README.md) package adds a separate C++ node
 that publishes phase-aware permissions on `/drone/safety_status` at 10 Hz.
@@ -19,24 +20,25 @@ px4_interface_node/
 ├── package.xml
 ├── msg/DroneState.msg
 ├── srv/SetFlightMode.srv
+├── srv/ExecuteCommand.srv
 ├── test/test_flight_mode.py
+├── tools/sitl_gcs.py
+├── tools/sitl_smoke_test.py
 └── src/px4_interface_node.cpp
 ```
 
 ## Prerequisites
 
 - ROS 2 Humble or later with `ament_cmake`, `rclcpp`, and interface generation
-- `px4_msgs` matching the firmware's message definitions (or a compatible PX4
-  message translation node)
-- PX4 SITL or a vehicle connected through the Micro XRCE-DDS agent
+- `px4_msgs` compatible with the PX4 firmware in use
+- A ROS 2 workspace and a PX4 telemetry source (such as PX4 SITL)
 
 ## Build
 
-Place `px4_interface_node` and `px4_msgs` inside your ROS 2 workspace's `src/`,
-then run from the workspace root:
+Place `px4_interface_node` inside the `src/` directory of your ROS 2 workspace, then run from the workspace root:
 
 ```bash
-source /opt/ros/humble/setup.bash  # Adjust for your ROS 2 distribution.
+source /opt/ros/humble/setup.bash  # Adjust for your ROS distribution.
 colcon build --packages-up-to px4_interface_node
 source install/setup.bash
 ```
@@ -47,138 +49,195 @@ source install/setup.bash
 ros2 run px4_interface_node px4_interface_node
 ```
 
-## Request and verify a mode change
+Stop older interface instances before launching the rebuilt node. Rebuild and
+re-source consumers of `DroneState` after changing its message definition.
+
+## State Machine Manager API
+
+`/drone/execute_command` uses `px4_interface_node/srv/ExecuteCommand`. Only
+these commands are accepted; raw PX4 command IDs and force flags are not exposed.
+
+| Request `command` | Meaning | `mode` |
+| --- | --- | --- |
+| 0 (`SET_MODE`) | Request a flight mode | Required uppercase name |
+| 1 (`ARM`) | Arm normally, with readiness guards | Empty |
+| 2 (`DISARM`) | Disarm normally, while landed | Empty |
+| 3 (`RUN_PREFLIGHT_CHECKS`) | Ask PX4 to refresh its checks | Empty |
+
+```bash
+ros2 service call /drone/execute_command px4_interface_node/srv/ExecuteCommand "{command: 0, mode: 'LOITER'}"
+ros2 service call /drone/execute_command px4_interface_node/srv/ExecuteCommand "{command: 3}"
+ros2 service call /drone/execute_command px4_interface_node/srv/ExecuteCommand "{command: 1}"
+ros2 service call /drone/execute_command px4_interface_node/srv/ExecuteCommand "{command: 2}"
+```
+
+The mode-only service remains available:
 
 ```bash
 ros2 service call /drone/set_flight_mode px4_interface_node/srv/SetFlightMode "{mode: 'LOITER'}"
-ros2 topic echo /drone/state
 ```
 
-The service sends `VEHICLE_CMD_DO_SET_MODE` on `/fmu/in/vehicle_command` and
-defers its response while telemetry and acknowledgments continue to arrive.
-`success: true` requires both:
+Supported names match `DroneState.flight_mode`: `MANUAL`, `ALTITUDE`, `POSITION`,
+`MISSION`, `LOITER`, `RTL`, `OFFBOARD`, `STABILIZED`, `TAKEOFF`, `LAND`, and
+`PRECISION_LAND`. PX4 still enforces its own mode prerequisites. In particular,
+the interface does not generate the heartbeat/setpoints needed for OFFBOARD
+and does not arm as a side effect of requesting a mode.
 
-1. A matching terminal `ACCEPTED` on `/fmu/out/vehicle_command_ack_v1`.
-2. Fresh `/fmu/out/vehicle_status_v4` reporting the requested **active**
-   `nav_state`, with a PX4 timestamp at least as new as that acknowledgment.
+One request is active across both services. Their deferred responses leave
+telemetry callbacks running. The generic response contains a local `request_id`,
+the command kind, `success`, `accepted`, result code, raw ACK result/reason
+parameters, and the last known mode/armed state plus `status_fresh`.
 
-An acknowledgment alone does not prove mode entry. PX4 can accept a requested
-mode while a failsafe keeps a different mode active. Status and ACKs may arrive
-in either order; cached status from before the command cannot complete it.
-Even a request for the current mode requires an ACK and new status.
-
-Supported names are case-sensitive and match `/drone/state.flight_mode`:
-`MANUAL`, `ALTITUDE`, `POSITION`, `MISSION`, `LOITER`, `RTL`, `OFFBOARD`,
-`STABILIZED`, `TAKEOFF`, `LAND`, `PRECISION_LAND`.
-
-The response includes `result`, `accepted`, raw `ack_result`, `current_mode`,
-`status_fresh`, and a descriptive `message`:
+`accepted` means PX4 sent terminal `ACCEPTED`; `IN_PROGRESS` is insufficient.
+`success` additionally requires a fresh `VehicleStatus` timestamp at least as
+new as the ACK and the requested **active** `nav_state` or arming state.
+`nav_state_user_intention` and cached pre-command telemetry cannot complete a
+request. A preflight-check request returns success only when the updated status
+reports passed checks; PX4 may accept running the checks while they still fail.
 
 | Result | Meaning |
 | --- | --- |
-| `SUCCESS` (0) | PX4 accepted and fresh telemetry confirmed the mode. |
-| `INVALID_MODE` (1) | Unsupported name; no command sent. |
-| `BUSY` (2) | Another mode request is pending; no command sent. |
-| `STATUS_UNAVAILABLE` (3) | Target vehicle status is absent or older than two seconds; no command sent. |
-| `REJECTED` (4) | PX4 returned a terminal result other than `ACCEPTED`; see `ack_result`. |
-| `ACK_TIMEOUT` (5) | No terminal ACK arrived before the acknowledgment deadline. |
-| `MODE_TIMEOUT` (6) | PX4 accepted, but fresh telemetry did not confirm entry before the mode deadline. |
+| 0 `SUCCESS` | Accepted and confirmed in telemetry |
+| 1 `INVALID_REQUEST` | Unsupported command/mode or invalid arguments; nothing sent |
+| 2 `BUSY` | Another request is pending; nothing sent |
+| 3 `STATUS_UNAVAILABLE` | Status missing/stale, including loss during a request |
+| 4 `REJECTED` | Terminal PX4 rejection; inspect raw ACK result and reason parameters |
+| 5 `ACK_TIMEOUT` | No terminal ACK by the acknowledgment deadline |
+| 6 `TRANSITION_TIMEOUT` | Accepted, but requested state not confirmed by the transition deadline |
+| 7 `PREFLIGHT_FAILED` | Failed checks, safety/calibration constraint, or non-landed arm request |
+| 8 `GCS_UNAVAILABLE` | Arming blocked by lost GCS connection |
+| 9 `FAILSAFE_ACTIVE` | Arming or a non-recovery mode blocked by failsafe |
+| 10 `LANDED_UNAVAILABLE` | Missing/stale land-detection telemetry for arm/disarm |
+| 11 `UNSAFE_DISARM` | In-flight disarm request blocked |
 
-`accepted` records a terminal PX4 `ACCEPTED`, including when mode entry later
-times out. `ack_result` is 255 (`NO_ACK`) if no matching ACK arrived, otherwise
-the latest matching raw PX4 result. `IN_PROGRESS` keeps the request pending
-without extending the ACK deadline. All other non-accepted results, including
-temporary rejection, return `REJECTED`. `current_mode` is last known;
-`status_fresh` indicates whether it is current.
+Raw `ack_result` is 255 (`NO_ACK`) until a matching ACK is received. The legacy
+mode service uses `INVALID_MODE` for result 1 and `MODE_TIMEOUT` for result 6.
 
-Only one request is sent at a time. No automatic retries are made: a timeout
-does not cancel the command in PX4, and the mode may still change afterward.
-Inspect fresh telemetry before deciding whether to issue another request.
-The node sends mode changes only; it does not arm or supply offboard setpoints.
-PX4's normal prerequisites still apply (for example, a suitable position
-estimate for LOITER and an existing offboard heartbeat/setpoint stream for
-OFFBOARD).
+## Readiness and protections
 
-## Routing and timeouts
-
-Startup parameters (read-only after startup):
-
-| Parameter | Default | Meaning |
-| --- | --- | --- |
-| `target_system` | 1 | PX4 system ID; also filters incoming vehicle status. |
-| `target_component` | 1 | PX4 autopilot component ID; also filters vehicle status. |
-| `source_system` | 1 | This command sender's system ID. |
-| `source_component` | 191 | This command sender's component ID. |
-| `ack_timeout_ms` | 2000 | Deadline from publication to terminal ACK. |
-| `mode_timeout_ms` | 5000 | Deadline from ACCEPTED to confirmed mode. |
-
-IDs must be in `[1, 255]`; timeout values must be in `[100, 60000]` ms. Deadlines
-and telemetry freshness use a monotonic clock, so paused ROS simulation time
-does not prevent a timeout. Commands carry ROS timestamps in microseconds;
-ACK/status ordering compares only the timestamps supplied by PX4.
-
-ACKs must identify `DO_SET_MODE`, target this node's source IDs, originate from
-PX4 (`from_external: false`), and be newer than the pre-command status snapshot.
-ACKs carry no transaction ID or requested mode. Reserve the source ID pair for
-this node, and do not run another command sender using the same IDs. Serialization
-and timestamp checks reject unrelated and already-old ACKs, but cannot identify
-an arbitrarily delayed earlier ACK generated after the next request's status
-snapshot. Separate vehicles must use separate DDS namespaces/remappings.
+`/drone/state` now includes `failsafe`, `pre_flight_checks_pass`,
+`gcs_connection_lost`, arming state, active/requested navigation states, safety
+and calibration flags, vehicle IDs, `landed`, `land_detected_fresh`,
+`ready_to_arm`, `arming_block_reason`, and `command_pending`.
 
 ```bash
-ros2 run px4_interface_node px4_interface_node --ros-args \
-  -p target_system:=2 -p source_component:=192 \
-  -p ack_timeout_ms:=3000 -p mode_timeout_ms:=8000
+ros2 topic echo /drone/state
 ```
 
-The topic names follow the repository's versioned telemetry interfaces:
+- All commands require target `VehicleStatus` received within two seconds.
+- Arming also requires no failsafe, GCS connected, PX4 preflight checks passed,
+  safety off, no calibration, and fresh landed telemetry confirming the ground.
+- Disarming requires fresh landed telemetry. It remains available with a lost
+  GCS or failed preflight checks, so those conditions cannot prevent a safe
+  ground disarm. Force arm/disarm is never sent (`param2` remains zero).
+- During failsafe, mode requests are limited to recovery modes `RTL` and `LAND`.
+- `ready_to_arm` is false while armed, busy, or any readiness guard fails. Raw
+  status flags remain last known; consumers must honor their freshness flags.
+- No automatic retries are made. A timeout does not cancel a command already
+  received by PX4; inspect fresh telemetry before requesting another action.
+
+ACKs must match the pending PX4 command ID, target this node's source IDs,
+originate from PX4, and have a timestamp newer than the pre-command status.
+Only one request is allowed in flight; stale and unrelated ACKs are ignored.
+PX4 ACKs carry neither the requested mode/arm action nor a transaction ID, so
+an arbitrarily delayed earlier ACK generated after the next status snapshot
+cannot be uniquely distinguished. Reserve the source ID pair for this node;
+the response's `request_id` correlates ROS requests, not the PX4 wire protocol.
+
+## Topics and configuration
 
 | Direction | Topic | Type |
 | --- | --- | --- |
-| In | `/fmu/out/vehicle_status_v4` | `px4_msgs/msg/VehicleStatus` |
-| In | `/fmu/out/vehicle_local_position_v1` | `px4_msgs/msg/VehicleLocalPosition` |
-| In | `/fmu/out/vehicle_odometry` | `px4_msgs/msg/VehicleOdometry` |
-| In | `/fmu/out/vehicle_gps_position` | `px4_msgs/msg/SensorGps` |
-| In (newer GNSS interface) | `/fmu/out/vehicle_gnss` | `px4_msgs/msg/VehicleGnss` |
-| In | `/fmu/out/battery_status_v1` | `px4_msgs/msg/BatteryStatus` |
-| In | `/fmu/out/vehicle_command_ack_v1` | `px4_msgs/msg/VehicleCommandAck` |
-| In | `/fmu/out/failsafe_flags` | `px4_msgs/msg/FailsafeFlags` |
-| In | `/fmu/out/vehicle_land_detected` | `px4_msgs/msg/VehicleLandDetected` |
-| Out | `/fmu/in/vehicle_command` | `px4_msgs/msg/VehicleCommand` |
+| In | `/fmu/out/vehicle_status_v4` | `VehicleStatus` |
+| In | `/fmu/out/vehicle_land_detected` | `VehicleLandDetected` |
+| In | `/fmu/out/failsafe_flags` | `FailsafeFlags` |
+| In | `/fmu/out/vehicle_local_position_v1` | `VehicleLocalPosition` |
+| In | `/fmu/out/vehicle_odometry` | `VehicleOdometry` |
+| In | `/fmu/out/battery_status_v1` | `BatteryStatus` |
+| In | `/fmu/out/vehicle_command_ack_v1` | `VehicleCommandAck` |
+| In, when legacy headers exist | `/fmu/out/vehicle_gps_position` | `SensorGps` |
+| In, otherwise | `/fmu/out/vehicle_gnss` | `VehicleGnss` |
+| Out | `/fmu/in/vehicle_command` | `VehicleCommand` |
 | Out | `/drone/state` | `px4_interface_node/msg/DroneState` |
 
-The build selects the original `SensorGps` interface when available; otherwise
-it uses the selected `VehicleGnss` receiver published by current PX4 firmware.
-Only one of these GPS subscriptions is created. Both require a 3D fix and
-finite coordinates; `VehicleGnss` must also report `usable: true`.
+PX4 message types are from `px4_msgs`. The build preserves the original GPS
+interface where available; current GNSS telemetry uses `receiver` coordinates
+and requires `usable`, a 3D fix, and finite coordinates. PX4 inputs use sensor
+best-effort QoS; outgoing commands use reliable, volatile QoS. Use matching
+firmware/message definitions, or PX4's message translation support; changing a
+topic suffix alone does not convert schemas. Separate vehicles need separate
+DDS namespaces and topic remappings.
 
-PX4 inputs use best-effort sensor-data subscriptions; commands use reliable,
-volatile QoS. Ensure the command and ACK topics are exposed by PX4's DDS bridge.
-Use `ros2 topic list` to verify topic names and ROS remappings if your bridge
-uses different namespaces or version suffixes. Remapping alone does not convert
-incompatible message definitions.
+Startup parameters are read-only: `target_system`/`target_component` default to
+1/1, `source_system`/`source_component` to 1/191, `ack_timeout_ms` to 2000, and
+`transition_timeout_ms` to 5000. IDs must be 1–255; timeouts must be 100–60000 ms.
+The legacy `mode_timeout_ms` supplies the transition default unless
+`transition_timeout_ms` is explicitly set. Deadlines and freshness use a
+monotonic clock, including when ROS simulation time is paused. The ACK deadline
+starts at publication; the transition deadline starts at terminal ACCEPTED.
 
-## Tests
+## SITL readiness and verification
 
-Install the package's test dependencies with `rosdep`, then run:
+The observed `gcs_connection_lost: true` came from an absent MAVLink GCS link.
+ROS DDS telemetry alone does not establish that connection. A live GCS link
+restored `gcs_connection_lost: false`, `pre_flight_checks_pass: true`, and
+`commander check: OK` in the tested SITL. Manual-control and other failed checks
+may still prohibit specific modes; verify readiness again after mode changes.
+Do not disable safety checks to make an arming test pass.
+
+Use QGroundControl for normal operation. For a foreground localhost-only SITL
+diagnostic link, `tools/sitl_gcs.py` requires `pymavlink`, receives diagnostics,
+and sends actual MAVLink GCS heartbeats; it never fabricates DDS status flags.
+If no MAVLink endpoint exists, start one in the **SITL PX4 shell**:
+
+```text
+mavlink start -u 18570 -o 14550 -t 127.0.0.1 -m minimal -r 20000
+```
+
+In a separate ROS/WSL terminal:
+
+```bash
+python3 src/px4_interface_node/tools/sitl_gcs.py --duration 180
+```
+
+The helper must remain running through the test; GCS loss returns after it
+exits unless another GCS is connected. It is a bounded SITL diagnostic tool.
+From disarmed, landed LOITER/Hold, with the new package sourced:
+
+```bash
+# Mode changes only, without arming:
+python3 src/px4_interface_node/tools/sitl_smoke_test.py
+# Also exercise a normal landed arm/disarm, gated on fresh readiness:
+python3 src/px4_interface_node/tools/sitl_smoke_test.py --test-arming --report sitl-result.json
+```
+
+The smoke test checks for a local SITL process and launches a temporary interface
+with `/phase3/drone/...` endpoints and source component 192. It tests
+`LOITER -> LAND -> LOITER` while disarmed, then optionally runs preflight checks,
+arms, and immediately disarms. Every result requires accepted ACK plus updated
+state. It leaves the vehicle disarmed in LOITER and shuts down its own interface;
+it does not take off. The real SITL mode/preflight/arm/disarm sequence passed
+during implementation with all five responses accepted and confirmed.
+
+## Automated tests
+
+Install test dependencies with `rosdep`, then run:
 
 ```bash
 colcon test --packages-select px4_interface_node --event-handlers console_direct+
 colcon test-result --verbose
 ```
 
-The launch test starts the real C++ node and a simulated PX4 peer over DDS,
-remapping every endpoint under `/test_px4_interface` to isolate commands from
-any connected vehicle. It covers success, ACK/status reordering, every supported
-mode's wire encoding, rejections, progress, both timeouts, stale/missing/wrong
-vehicle status, unrelated/late ACKs, invalid modes, concurrent requests, and
-continued telemetry publication while a request is pending. This test does not
-replace PX4 SITL or hardware validation. A GPS validity regression test also
-covers the GPS/GNSS interface selected at build time.
+The launch suite exercises the real C++ node against a simulated PX4 peer,
+remapping all endpoints under `/test_px4_interface`. It covers command encoding,
+mode and arm/disarm confirmations, cross-command ACK filtering, rejections,
+progress, timeouts, stale status/land detection, readiness guards, shared-service
+serialization, paused ROS time, continued telemetry, and GPS/GNSS validity.
 
-PX4 protocol references: [ROS 2 user guide](https://docs.px4.io/main/en/ros2/user_guide),
-[custom mode definitions](https://github.com/PX4/PX4-Autopilot/blob/main/src/modules/commander/px4_custom_mode.h),
-[acknowledgment definition](https://github.com/PX4/px4_msgs/blob/main/msg/VehicleCommandAck.msg).
+Protocol references: [PX4 ROS 2 guide](https://docs.px4.io/main/en/ros2/user_guide)
+and [arming checks](https://docs.px4.io/v1.18/en/advanced_config/prearm_arm_disarm).
 
-The package still contains placeholder maintainer metadata; update it before
-publishing a release.
+## Notes
+
+The package contains placeholder maintainer metadata; update it before publishing
+a release. Validation used ROS 2 Humble, PX4 SITL, and compatible `px4_msgs`.

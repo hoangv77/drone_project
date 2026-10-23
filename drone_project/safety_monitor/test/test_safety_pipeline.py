@@ -41,6 +41,7 @@ def generate_test_description():
     topics = list(RAW) + [
         '/fmu/out/vehicle_odometry', '/fmu/out/vehicle_command_ack_v1',
         '/fmu/in/vehicle_command', '/drone/state', '/drone/set_flight_mode',
+        '/drone/execute_command',
     ]
     interface = launch_ros.actions.Node(
         package='px4_interface_node', executable='px4_interface_node',
