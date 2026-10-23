@@ -1,0 +1,16 @@
+# ROS 2 / colcon generated outputs
+build/
+install/
+log/
+
+# Python and editor artifacts
+__pycache__/
+*.py[cod]
+.vscode/
+.idea/
+*.swp
+*~
+
+# OS files
+.DS_Store
+Thumbs.db
