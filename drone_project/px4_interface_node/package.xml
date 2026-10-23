@@ -4,7 +4,7 @@
   <version>0.0.0</version>
 
   <description>
-    Read-only ROS 2 interface that converts PX4 telemetry into a clean drone state.
+    Bidirectional PX4 telemetry and guarded commands with acknowledgment and state verification.
   </description>
 
   <maintainer email="you@example.com">Your Name</maintainer>
@@ -15,14 +15,21 @@
 
   <!-- Dependencies used by the C++ node and DroneState message. -->
   <depend>rclcpp</depend>
+  <depend>rcl_interfaces</depend>
   <depend>px4_msgs</depend>
   <depend>builtin_interfaces</depend>
 
-  <!-- Generate C++ code from msg/DroneState.msg. -->
+  <!-- Generate C++ code from the custom message and service. -->
   <build_depend>rosidl_default_generators</build_depend>
   <exec_depend>rosidl_default_runtime</exec_depend>
 
-  <!-- Required because this package defines a custom ROS message. -->
+  <test_depend>launch_testing_ament_cmake</test_depend>
+  <test_depend>launch_ros</test_depend>
+  <test_depend>rclpy</test_depend>
+  <test_depend>python3-pytest</test_depend>
+  <test_depend>ament_index_python</test_depend>
+
+  <!-- Required because this package defines custom ROS interfaces. -->
   <member_of_group>rosidl_interface_packages</member_of_group>
 
   <export>

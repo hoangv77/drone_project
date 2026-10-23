@@ -5,6 +5,7 @@
 // Our clean internal state message generated from msg/DroneState.msg.
 #include <px4_interface_node/msg/drone_state.hpp>
 #include <px4_interface_node/srv/set_flight_mode.hpp>
+#include <px4_interface_node/srv/execute_command.hpp>
 
 // PX4 telemetry and command messages.
 #include <px4_msgs/msg/battery_status.hpp>
@@ -19,6 +20,7 @@
 #include <px4_msgs/msg/vehicle_status.hpp>
 #include <px4_msgs/msg/vehicle_command.hpp>
 #include <px4_msgs/msg/vehicle_command_ack.hpp>
+#include <px4_msgs/msg/vehicle_land_detected.hpp>
 
 #include <array>
 #include <chrono>
@@ -60,7 +62,17 @@ public:
             return std::chrono::milliseconds(timeout);
         };
         ack_timeout_ = timeout_parameter("ack_timeout_ms", 2000);
-        mode_timeout_ = timeout_parameter("mode_timeout_ms", 5000);
+        const auto legacy_timeout = timeout_parameter("mode_timeout_ms", 5000);
+        transition_timeout_ = timeout_parameter(
+            "transition_timeout_ms", static_cast<int>(legacy_timeout.count()));
+
+        land_subscription_ = create_subscription<px4_msgs::msg::VehicleLandDetected>(
+            "/fmu/out/vehicle_land_detected", rclcpp::SensorDataQoS(),
+            [this](px4_msgs::msg::VehicleLandDetected::SharedPtr msg) {
+                landed_ = msg->landed;
+                last_land_rx_ = std::chrono::steady_clock::now();
+                has_land_ = true;
+            });
 
         // PX4 telemetry uses best-effort sensor-data QoS. A subscriber with
         // incompatible reliable-only QoS might never receive these messages.
@@ -130,11 +142,32 @@ public:
             "/drone/set_flight_mode",
             [this](std::shared_ptr<rmw_request_id_t> header,
                    SetFlightMode::Request::SharedPtr request) {
-                request_flight_mode(header, request);
+                request_command(ExecuteCommand::Request::SET_MODE, request->mode,
+                    [this, header](const CommandResponse & result) {
+                        SetFlightMode::Response response;
+                        response.success = result.success;
+                        response.accepted = result.accepted;
+                        response.result = result.result;
+                        response.ack_result = result.ack_result;
+                        response.current_mode = result.current_mode;
+                        response.status_fresh = result.status_fresh;
+                        response.message = result.message;
+                        mode_service_->send_response(*header, response);
+                    });
+            });
+        command_service_ = create_service<ExecuteCommand>(
+            "/drone/execute_command",
+            [this](std::shared_ptr<rmw_request_id_t> header,
+                   ExecuteCommand::Request::SharedPtr request) {
+                request_command(request->command, request->mode,
+                    [this, header](const CommandResponse & result) {
+                        auto response = result;
+                        command_service_->send_response(*header, response);
+                    });
             });
         command_timer_ = create_wall_timer(
             std::chrono::milliseconds(20),
-            std::bind(&Px4InterfaceNode::check_mode_request, this));
+            std::bind(&Px4InterfaceNode::check_command, this));
 
         // Publish one assembled snapshot every 100 ms (10 Hz), independent of
         // the different arrival rates of the five PX4 topics.
@@ -145,13 +178,16 @@ public:
         RCLCPP_INFO(
             get_logger(),
             "PX4 interface started; publishing /drone/state at 10 Hz; "
-            "flight-mode service: /drone/set_flight_mode.");
+            "command API: /drone/execute_command; mode API: /drone/set_flight_mode.");
     }
 
 private:
     using SteadyTimePoint = std::chrono::steady_clock::time_point;
     using SetFlightMode = px4_interface_node::srv::SetFlightMode;
-    using ModeResponse = SetFlightMode::Response;
+    using ExecuteCommand = px4_interface_node::srv::ExecuteCommand;
+    using CommandRequest = ExecuteCommand::Request;
+    using CommandResponse = ExecuteCommand::Response;
+    using Completion = std::function<void(const CommandResponse &)>;
     using CommandAck = px4_msgs::msg::VehicleCommandAck;
 #if __has_include(<px4_msgs/msg/sensor_gps.hpp>)
     using GpsMessage = px4_msgs::msg::SensorGps;
@@ -207,79 +243,137 @@ private:
         return "UNKNOWN";
     }
 
-    struct PendingMode
+    struct PendingCommand
     {
-        std::shared_ptr<rmw_request_id_t> header;
-        const FlightMode * mode;
+        Completion complete;
+        CommandResponse response;
+        const FlightMode * mode{nullptr};
+        uint32_t px4_command{0};
         SteadyTimePoint deadline;
-        uint64_t status_timestamp_at_request;
+        uint64_t status_timestamp_at_request{0};
         uint64_t ack_timestamp{0};
-        uint8_t ack_result{ModeResponse::NO_ACK};
-        bool accepted{false};
     };
 
-    void send_mode_response(
-        const std::shared_ptr<rmw_request_id_t> & header, uint8_t result,
-        bool accepted, uint8_t ack_result, const std::string & message)
+    struct GuardResult
     {
-        ModeResponse response;
-        response.success = result == ModeResponse::SUCCESS;
-        response.accepted = accepted;
+        uint8_t result;
+        std::string message;
+    };
+
+    GuardResult command_guard(
+        uint8_t kind, const FlightMode * mode, const SteadyTimePoint & steady_now) const
+    {
+        if (!is_fresh(has_status_, last_status_rx_, status_timeout_, steady_now)) {
+            return {CommandResponse::STATUS_UNAVAILABLE, "No fresh VehicleStatus from target PX4"};
+        }
+        if (kind == CommandRequest::SET_MODE && failsafe_ &&
+            mode->nav_state != px4_msgs::msg::VehicleStatus::NAVIGATION_STATE_AUTO_RTL &&
+            mode->nav_state != px4_msgs::msg::VehicleStatus::NAVIGATION_STATE_AUTO_LAND)
+        {
+            return {CommandResponse::FAILSAFE_ACTIVE, "Failsafe active; only RTL or LAND mode requests allowed"};
+        }
+        if (kind == CommandRequest::ARM) {
+            if (failsafe_) {
+                return {CommandResponse::FAILSAFE_ACTIVE, "PX4 failsafe is active"};
+            }
+            if (gcs_connection_lost_) {
+                return {CommandResponse::GCS_UNAVAILABLE, "PX4 has no ground-control-station connection"};
+            }
+            if (!pre_flight_checks_pass_ || calibration_enabled_ || !safety_off_) {
+                return {CommandResponse::PREFLIGHT_FAILED,
+                    "Arming requires passed PX4 preflight checks, safety off, and no calibration"};
+            }
+        }
+        if (kind == CommandRequest::ARM || kind == CommandRequest::DISARM) {
+            if (!is_fresh(has_land_, last_land_rx_, status_timeout_, steady_now)) {
+                return {CommandResponse::LANDED_UNAVAILABLE, "No fresh land-detection telemetry"};
+            }
+            if (!landed_) {
+                return {kind == CommandRequest::DISARM ? CommandResponse::UNSAFE_DISARM :
+                    CommandResponse::PREFLIGHT_FAILED, "Vehicle must be landed; force commands are not supported"};
+            }
+        }
+        return {CommandResponse::SUCCESS, ""};
+    }
+
+    void respond(CommandResponse response, uint8_t result, const std::string & message,
+        const Completion & complete)
+    {
+        response.success = result == CommandResponse::SUCCESS;
         response.result = result;
-        response.ack_result = ack_result;
         response.current_mode = flight_mode_;
+        response.armed = armed_;
         response.status_fresh = is_fresh(
             has_status_, last_status_rx_, status_timeout_, std::chrono::steady_clock::now());
         response.message = message;
-        mode_service_->send_response(*header, response);
+        complete(response);
     }
 
-    void finish_mode_request(uint8_t result, const std::string & message)
+    void finish_command(uint8_t result, const std::string & message)
     {
-        auto completed = std::move(pending_mode_);
-        RCLCPP_INFO(get_logger(), "Mode %s: %s", completed->mode->name, message.c_str());
-        send_mode_response(
-            completed->header, result, completed->accepted, completed->ack_result, message);
+        auto completed = std::move(pending_command_);
+        RCLCPP_INFO(get_logger(), "Request %llu command %u: %s",
+            static_cast<unsigned long long>(completed->response.request_id),
+            completed->response.command, message.c_str());
+        respond(completed->response, result, message, completed->complete);
     }
 
-    void request_flight_mode(
-        const std::shared_ptr<rmw_request_id_t> & header,
-        const SetFlightMode::Request::SharedPtr & request)
+    void request_command(uint8_t kind, const std::string & mode_name, Completion complete)
     {
-        check_mode_request();
-        const FlightMode * requested_mode = nullptr;
-        for (const auto & mode : flight_modes()) {
-            if (request->mode == mode.name) {
-                requested_mode = &mode;
-                break;
+        check_command();
+        CommandResponse response;
+        response.request_id = ++request_sequence_;
+        response.command = kind;
+        response.ack_result = CommandResponse::NO_ACK;
+        const FlightMode * mode = nullptr;
+        if (kind == CommandRequest::SET_MODE) {
+            for (const auto & candidate : flight_modes()) {
+                if (mode_name == candidate.name) {
+                    mode = &candidate;
+                    break;
+                }
             }
         }
-        if (!requested_mode) {
-            send_mode_response(header, ModeResponse::INVALID_MODE, false,
-                ModeResponse::NO_ACK, "Unsupported flight mode: " + request->mode);
+        if (kind > CommandRequest::RUN_PREFLIGHT_CHECKS ||
+            (kind == CommandRequest::SET_MODE && !mode) ||
+            (kind != CommandRequest::SET_MODE && !mode_name.empty()))
+        {
+            respond(response, CommandResponse::INVALID_REQUEST,
+                "Unsupported command/mode, or mode supplied for a non-mode command", complete);
             return;
         }
-        if (pending_mode_) {
-            send_mode_response(header, ModeResponse::BUSY, false,
-                ModeResponse::NO_ACK, "Another flight-mode request is pending");
+        if (pending_command_) {
+            respond(response, CommandResponse::BUSY, "Another PX4 command is pending", complete);
             return;
         }
         const auto steady_now = std::chrono::steady_clock::now();
-        if (!is_fresh(has_status_, last_status_rx_, status_timeout_, steady_now)) {
-            send_mode_response(header, ModeResponse::STATUS_UNAVAILABLE, false,
-                ModeResponse::NO_ACK, "No fresh VehicleStatus from the target PX4");
+        const auto guard = command_guard(kind, mode, steady_now);
+        if (guard.result != CommandResponse::SUCCESS) {
+            respond(response, guard.result, guard.message, complete);
             return;
         }
 
-        pending_mode_ = std::make_unique<PendingMode>(PendingMode{
-            header, requested_mode, steady_now + ack_timeout_, last_status_timestamp_});
-
         px4_msgs::msg::VehicleCommand command;
+        if (kind == CommandRequest::SET_MODE) {
+            command.command = px4_msgs::msg::VehicleCommand::VEHICLE_CMD_DO_SET_MODE;
+            command.param1 = 1.0F;  // MAV_MODE_FLAG_CUSTOM_MODE_ENABLED
+            command.param2 = mode->main_mode;
+            command.param3 = mode->sub_mode;
+        } else if (kind == CommandRequest::RUN_PREFLIGHT_CHECKS) {
+            command.command = px4_msgs::msg::VehicleCommand::VEHICLE_CMD_RUN_PREARM_CHECKS;
+        } else {
+            command.command = px4_msgs::msg::VehicleCommand::VEHICLE_CMD_COMPONENT_ARM_DISARM;
+            command.param1 = kind == CommandRequest::ARM ? 1.0F : 0.0F;
+            command.param2 = 0.0F;  // Never bypass PX4 checks or force a disarm.
+        }
+        pending_command_ = std::make_unique<PendingCommand>();
+        pending_command_->complete = std::move(complete);
+        pending_command_->response = response;
+        pending_command_->mode = mode;
+        pending_command_->px4_command = command.command;
+        pending_command_->deadline = steady_now + ack_timeout_;
+        pending_command_->status_timestamp_at_request = last_status_timestamp_;
         command.timestamp = static_cast<uint64_t>(now().nanoseconds() / 1000);
-        command.command = px4_msgs::msg::VehicleCommand::VEHICLE_CMD_DO_SET_MODE;
-        command.param1 = 1.0F;  // MAV_MODE_FLAG_CUSTOM_MODE_ENABLED
-        command.param2 = requested_mode->main_mode;
-        command.param3 = requested_mode->sub_mode;
         command.target_system = target_system_;
         command.target_component = target_component_;
         command.source_system = source_system_;
@@ -291,54 +385,66 @@ private:
 
     void command_ack_callback(CommandAck::SharedPtr msg)
     {
-        check_mode_request();
-        if (!pending_mode_ || pending_mode_->accepted ||
-            msg->command != px4_msgs::msg::VehicleCommand::VEHICLE_CMD_DO_SET_MODE ||
+        check_command();
+        if (!pending_command_ || pending_command_->response.accepted ||
+            msg->command != pending_command_->px4_command ||
             msg->target_system != source_system_ ||
             msg->target_component != source_component_ || msg->from_external ||
-            msg->timestamp <= pending_mode_->status_timestamp_at_request ||
-            msg->timestamp <= pending_mode_->ack_timestamp)
+            msg->timestamp <= pending_command_->status_timestamp_at_request ||
+            msg->timestamp <= pending_command_->ack_timestamp)
         {
             return;
         }
-        pending_mode_->ack_result = msg->result;
-        pending_mode_->ack_timestamp = msg->timestamp;
+        pending_command_->response.ack_result = msg->result;
+        pending_command_->response.ack_result_param1 = msg->result_param1;
+        pending_command_->response.ack_result_param2 = msg->result_param2;
+        pending_command_->ack_timestamp = msg->timestamp;
         if (msg->result == CommandAck::VEHICLE_CMD_RESULT_IN_PROGRESS) {
-            // Keep waiting for a terminal ACK without extending the deadline.
-            return;
+            return;  // Progress never extends the terminal-ACK deadline.
         }
         if (msg->result != CommandAck::VEHICLE_CMD_RESULT_ACCEPTED) {
-            finish_mode_request(ModeResponse::REJECTED,
-                "PX4 rejected the mode command (ACK result " + std::to_string(msg->result) + ")");
+            finish_command(CommandResponse::REJECTED,
+                "PX4 rejected command (ACK result " + std::to_string(msg->result) + ")");
             return;
         }
-        pending_mode_->accepted = true;
-        pending_mode_->deadline = std::chrono::steady_clock::now() + mode_timeout_;
-        check_mode_request();
+        pending_command_->response.accepted = true;
+        pending_command_->deadline = std::chrono::steady_clock::now() + transition_timeout_;
+        check_command();
     }
 
-    void check_mode_request()
+    void check_command()
     {
-        if (!pending_mode_) {
+        if (!pending_command_) {
             return;
         }
         const auto steady_now = std::chrono::steady_clock::now();
-        if (steady_now >= pending_mode_->deadline) {
-            const bool accepted = pending_mode_->accepted;
-            finish_mode_request(
-                accepted ? ModeResponse::MODE_TIMEOUT : ModeResponse::ACK_TIMEOUT,
-                accepted ? "PX4 accepted, but fresh status did not confirm mode entry" :
-                "Timed out waiting for a terminal PX4 acknowledgment");
+        if (steady_now >= pending_command_->deadline) {
+            finish_command(pending_command_->response.accepted ?
+                CommandResponse::TRANSITION_TIMEOUT : CommandResponse::ACK_TIMEOUT,
+                "Timed out waiting for terminal acknowledgment or confirmed state transition");
             return;
         }
-        // Status and ACKs can arrive in either order on different DDS topics.
-        // Compare their PX4 timestamps, never PX4 timestamps against ROS time.
-        if (pending_mode_->accepted &&
-            is_fresh(has_status_, last_status_rx_, status_timeout_, steady_now) &&
-            last_status_timestamp_ >= pending_mode_->ack_timestamp &&
-            nav_state_ == pending_mode_->mode->nav_state)
+        if (!is_fresh(has_status_, last_status_rx_, status_timeout_, steady_now)) {
+            finish_command(CommandResponse::STATUS_UNAVAILABLE, "VehicleStatus became stale during command");
+            return;
+        }
+        // Different DDS topics can arrive in either order. Only PX4 timestamps
+        // are compared to one another; cached pre-command state cannot confirm.
+        if (!pending_command_->response.accepted ||
+            last_status_timestamp_ < pending_command_->ack_timestamp)
         {
-            finish_mode_request(ModeResponse::SUCCESS, "PX4 accepted and entered the requested mode");
+            return;
+        }
+        const auto kind = pending_command_->response.command;
+        if (kind == CommandRequest::RUN_PREFLIGHT_CHECKS) {
+            finish_command(pre_flight_checks_pass_ ? CommandResponse::SUCCESS :
+                CommandResponse::PREFLIGHT_FAILED, pre_flight_checks_pass_ ?
+                "PX4 accepted preflight check and reports checks passed" :
+                "PX4 accepted preflight check but reports failed checks");
+        } else if ((kind == CommandRequest::SET_MODE && nav_state_ == pending_command_->mode->nav_state) ||
+            (kind == CommandRequest::ARM && armed_) || (kind == CommandRequest::DISARM && !armed_))
+        {
+            finish_command(CommandResponse::SUCCESS, "PX4 accepted and fresh telemetry confirmed requested state");
         }
     }
 
@@ -362,12 +468,19 @@ private:
             msg->arming_state ==
             px4_msgs::msg::VehicleStatus::ARMING_STATE_ARMED;
         nav_state_ = msg->nav_state;
+        arming_state_ = msg->arming_state;
+        nav_state_user_intention_ = msg->nav_state_user_intention;
+        failsafe_ = msg->failsafe;
+        pre_flight_checks_pass_ = msg->pre_flight_checks_pass;
+        gcs_connection_lost_ = msg->gcs_connection_lost;
+        safety_off_ = msg->safety_off;
+        calibration_enabled_ = msg->calibration_enabled;
         flight_mode_ = flight_mode_name(nav_state_);
 
         last_status_rx_ = std::chrono::steady_clock::now();
         has_status_ = true;
         last_status_timestamp_ = msg->timestamp;
-        check_mode_request();
+        check_command();
     }
 
     void local_position_callback(
@@ -465,6 +578,23 @@ private:
         // check status_fresh before treating them as current truth.
         state.armed = armed_;
         state.flight_mode = flight_mode_;
+        state.arming_state = arming_state_;
+        state.nav_state = nav_state_;
+        state.nav_state_user_intention = nav_state_user_intention_;
+        state.failsafe = failsafe_;
+        state.pre_flight_checks_pass = pre_flight_checks_pass_;
+        state.gcs_connection_lost = gcs_connection_lost_;
+        state.safety_off = safety_off_;
+        state.calibration_enabled = calibration_enabled_;
+        state.system_id = has_status_ ? target_system_ : 0;
+        state.component_id = has_status_ ? target_component_ : 0;
+        state.landed = landed_;
+        state.land_detected_fresh = is_fresh(has_land_, last_land_rx_, status_timeout_, steady_now);
+        const auto arm_guard = command_guard(CommandRequest::ARM, nullptr, steady_now);
+        state.ready_to_arm = !armed_ && !pending_command_ && arm_guard.result == CommandResponse::SUCCESS;
+        state.arming_block_reason = armed_ ? "Already armed" :
+            (pending_command_ ? "Another command is pending" : arm_guard.message);
+        state.command_pending = pending_command_ != nullptr;
 
         // Position is declared valid only when both PX4's estimator says it is
         // valid and the source topic is still arriving on time.
@@ -513,18 +643,31 @@ private:
     rclcpp::Publisher<px4_msgs::msg::VehicleCommand>::SharedPtr command_publisher_;
     rclcpp::Subscription<CommandAck>::SharedPtr command_ack_subscription_;
     rclcpp::Service<SetFlightMode>::SharedPtr mode_service_;
+    rclcpp::Service<ExecuteCommand>::SharedPtr command_service_;
+    rclcpp::Subscription<px4_msgs::msg::VehicleLandDetected>::SharedPtr land_subscription_;
     rclcpp::TimerBase::SharedPtr command_timer_;
-    std::unique_ptr<PendingMode> pending_mode_;
+    std::unique_ptr<PendingCommand> pending_command_;
+    uint64_t request_sequence_{0};
     uint8_t target_system_{1};
     uint8_t target_component_{1};
     uint8_t source_system_{1};
     uint8_t source_component_{191};
     std::chrono::milliseconds ack_timeout_{2000};
-    std::chrono::milliseconds mode_timeout_{5000};
+    std::chrono::milliseconds transition_timeout_{5000};
     uint64_t last_status_timestamp_{0};
 
     // Cached normalized values. NaN means no valid measurement is known yet.
     bool armed_{false};
+    uint8_t arming_state_{0};
+    uint8_t nav_state_user_intention_{0};
+    bool failsafe_{true};
+    bool pre_flight_checks_pass_{false};
+    bool gcs_connection_lost_{true};
+    bool safety_off_{false};
+    bool calibration_enabled_{false};
+    bool has_land_{false};
+    bool landed_{false};
+    SteadyTimePoint last_land_rx_{};
     uint8_t nav_state_{0};
     std::string flight_mode_{"UNKNOWN"};
 
