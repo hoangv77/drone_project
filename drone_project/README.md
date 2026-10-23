@@ -3,6 +3,14 @@
 ROS 2 interface that publishes PX4 telemetry on `/drone/state` at 10 Hz and
 handles verified flight-mode changes through `/drone/set_flight_mode`.
 
+The [safety_monitor](safety_monitor/README.md) package adds a separate C++ node
+that publishes phase-aware permissions on `/drone/safety_status` at 10 Hz.
+Build both with `colcon build --packages-up-to safety_monitor`, source the
+overlay, and run `ros2 launch safety_monitor safety.launch.py`. It requires fresh
+PX4 failsafe flags and land detection in addition to the existing telemetry.
+Rebuild all `DroneState` consumers after updating this branch. Visual landing
+remains blocked pending AprilTag and landing-envelope integration.
+
 ## Structure
 
 ```text
@@ -134,6 +142,8 @@ The topic names follow the repository's versioned telemetry interfaces:
 | In (newer GNSS interface) | `/fmu/out/vehicle_gnss` | `px4_msgs/msg/VehicleGnss` |
 | In | `/fmu/out/battery_status_v1` | `px4_msgs/msg/BatteryStatus` |
 | In | `/fmu/out/vehicle_command_ack_v1` | `px4_msgs/msg/VehicleCommandAck` |
+| In | `/fmu/out/failsafe_flags` | `px4_msgs/msg/FailsafeFlags` |
+| In | `/fmu/out/vehicle_land_detected` | `px4_msgs/msg/VehicleLandDetected` |
 | Out | `/fmu/in/vehicle_command` | `px4_msgs/msg/VehicleCommand` |
 | Out | `/drone/state` | `px4_interface_node/msg/DroneState` |
 

@@ -1,0 +1,4 @@
+# Colcon output when invoked from the repository root.
+/build/
+/install/
+/log/

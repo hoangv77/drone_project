@@ -10,6 +10,7 @@ import launch_testing.actions
 import launch_testing.asserts
 import pytest
 import rclpy
+from rclpy.clock import Clock, ClockType
 from rclpy.parameter import Parameter
 from rclpy.qos import qos_profile_sensor_data
 from rcl_interfaces.srv import SetParameters
@@ -44,6 +45,7 @@ def generate_test_description():
         '/fmu/out/vehicle_status_v4', '/fmu/out/vehicle_local_position_v1',
         '/fmu/out/vehicle_odometry', '/fmu/out/vehicle_gps_position',
         '/fmu/out/vehicle_gnss',
+        '/fmu/out/vehicle_land_detected', '/fmu/out/failsafe_flags',
         '/fmu/out/battery_status_v1', '/fmu/out/vehicle_command_ack_v1',
         '/fmu/in/vehicle_command', '/drone/state', '/drone/set_flight_mode',
     ]
@@ -80,7 +82,8 @@ class TestFlightMode(unittest.TestCase):
             DroneState, STATE, cls.states.append, 10)
         cls.status_enabled = False
         cls.status_mode = V.NAVIGATION_STATE_MANUAL
-        cls.timer = cls.node.create_timer(0.03, cls.status_tick)
+        cls.timer = cls.node.create_timer(
+            0.03, cls.status_tick, clock=Clock(clock_type=ClockType.STEADY_TIME))
         assert cls.client.wait_for_service(timeout_sec=10.0)
         deadline = time.monotonic() + 10.0
         while (cls.status_pub.get_subscription_count() == 0 or
