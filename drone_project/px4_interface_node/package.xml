@@ -4,7 +4,7 @@
   <version>0.0.0</version>
 
   <description>
-    ROS 2 PX4 telemetry interface with acknowledged, verified flight-mode commands.
+    Bidirectional PX4 telemetry and guarded commands with acknowledgment and state verification.
   </description>
 
   <maintainer email="you@example.com">Your Name</maintainer>
@@ -27,6 +27,7 @@
   <test_depend>launch_ros</test_depend>
   <test_depend>rclpy</test_depend>
   <test_depend>python3-pytest</test_depend>
+  <test_depend>ament_index_python</test_depend>
 
   <!-- Required because this package defines custom ROS interfaces. -->
   <member_of_group>rosidl_interface_packages</member_of_group>
