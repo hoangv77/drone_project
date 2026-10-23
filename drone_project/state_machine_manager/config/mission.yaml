@@ -1,0 +1,18 @@
+state_machine_manager:
+  ros__parameters:
+    telemetry_timeout_ms: 500
+    safety_timeout_ms: 500
+    feedback_timeout_ms: 500
+    arming_handoff_timeout_ms: 1000
+    mission_timeout_ms: 180000
+    preflight_timeout_ms: 30000
+    armed_waiting_timeout_ms: 30000
+    throw_timeout_ms: 5000
+    stabilize_timeout_ms: 10000
+    search_timeout_ms: 30000
+    tracking_timeout_ms: 60000
+    tag_loss_timeout_ms: 1000
+    landing_timeout_ms: 60000
+    recovery_timeout_ms: 30000
+    enable_stage_feedback: false
+    allow_flight_warnings: false

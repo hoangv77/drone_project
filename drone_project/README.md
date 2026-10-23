@@ -12,6 +12,12 @@ PX4 failsafe flags and land detection in addition to the existing telemetry.
 Rebuild all `DroneState` consumers after updating this branch. Visual landing
 remains blocked pending AprilTag and landing-envelope integration.
 
+The [state_machine_manager](state_machine_manager/README.md) package provides
+the passive mission FSM, operator start/abort/reset services, and mission-state
+publication. Build with `colcon build --packages-up-to state_machine_manager`
+and launch with `ros2 launch state_machine_manager mission.launch.py`. It reuses
+the safety monitor's permissions and sends no PX4 flight commands.
+
 ## Structure
 
 ```text
