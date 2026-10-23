@@ -1,0 +1,23 @@
+# Use a flight_mode name published by /drone/state (for example LOITER).
+string mode
+---
+uint8 SUCCESS=0
+uint8 INVALID_MODE=1
+uint8 BUSY=2
+uint8 STATUS_UNAVAILABLE=3
+uint8 REJECTED=4
+uint8 ACK_TIMEOUT=5
+uint8 MODE_TIMEOUT=6
+uint8 NO_ACK=255
+
+# True only after ACCEPTED and fresh VehicleStatus confirms the requested mode.
+bool success
+# True only if PX4 sent a terminal ACCEPTED acknowledgment.
+bool accepted
+uint8 result
+# Raw VehicleCommandAck.result, or NO_ACK when no matching ACK was received.
+uint8 ack_result
+# Last known mode; check status_fresh before treating it as current.
+string current_mode
+bool status_fresh
+string message
