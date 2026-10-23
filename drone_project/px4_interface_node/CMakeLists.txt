@@ -13,6 +13,7 @@ endif()
 # Locate the ROS 2 build system and every package used by our code.
 find_package(ament_cmake REQUIRED)
 find_package(rclcpp REQUIRED)
+find_package(rcl_interfaces REQUIRED)
 find_package(px4_msgs REQUIRED)
 find_package(builtin_interfaces REQUIRED)
 
@@ -20,13 +21,14 @@ find_package(builtin_interfaces REQUIRED)
 find_package(rosidl_default_generators REQUIRED)
 find_package(rosidl_typesupport_cpp REQUIRED)
 
-# Generate C++ code from our custom DroneState.msg definition.
+# Generate the clean telemetry message and flight-mode service.
 #
 # DEPENDENCIES lists message packages referenced inside DroneState.msg.
 # We need builtin_interfaces because the message contains
 # builtin_interfaces/Time last_update_time.
 rosidl_generate_interfaces(${PROJECT_NAME}
   "msg/DroneState.msg"
+  "srv/SetFlightMode.srv"
   DEPENDENCIES builtin_interfaces
 )
 
@@ -39,15 +41,17 @@ add_executable(px4_interface_node_executable
 set_target_properties(px4_interface_node_executable PROPERTIES
   OUTPUT_NAME px4_interface_node
 )
+target_compile_features(px4_interface_node_executable PUBLIC cxx_std_17)
 
 # Link the ordinary ROS 2 dependencies used by the C++ source file.
 ament_target_dependencies(px4_interface_node_executable
   rclcpp
+  rcl_interfaces
   px4_msgs
   builtin_interfaces
 )
 
-# Obtain the C++ type-support target generated for DroneState.msg.
+# Obtain the C++ type-support target generated for our interfaces.
 # This is necessary because the executable and custom message live in the
 # same package.
 rosidl_get_typesupport_target(cpp_typesupport_target
@@ -55,7 +59,7 @@ rosidl_get_typesupport_target(cpp_typesupport_target
   "rosidl_typesupport_cpp"
 )
 
-# Link the executable to the generated DroneState C++ type support.
+# Link the executable to the generated message and service C++ type support.
 target_link_libraries(px4_interface_node_executable
   "${cpp_typesupport_target}"
 )
@@ -68,9 +72,14 @@ install(TARGETS
   DESTINATION lib/${PROJECT_NAME}
 )
 
-# Tell packages that depend on us that our generated message needs the
+# Tell packages that depend on us that our generated interfaces need the
 # ROS interface runtime.
 ament_export_dependencies(rosidl_default_runtime)
+
+if(BUILD_TESTING)
+  find_package(launch_testing_ament_cmake REQUIRED)
+  add_launch_test(test/test_flight_mode.py TIMEOUT 120)
+endif()
 
 # Finish configuring this as an ament package.
 # Keep this as the final command in the file.
