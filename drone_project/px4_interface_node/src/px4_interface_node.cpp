@@ -1,23 +1,35 @@
 // ROS 2 C++ API: nodes, publishers, subscriptions, timers, and logging.
 #include <rclcpp/rclcpp.hpp>
+#include <rcl_interfaces/msg/parameter_descriptor.hpp>
 
 // Our clean internal state message generated from msg/DroneState.msg.
 #include <px4_interface_node/msg/drone_state.hpp>
+#include <px4_interface_node/srv/set_flight_mode.hpp>
 
-// PX4 telemetry message types used by this read-only interface.
+// PX4 telemetry and command messages.
 #include <px4_msgs/msg/battery_status.hpp>
+#if __has_include(<px4_msgs/msg/sensor_gps.hpp>)
 #include <px4_msgs/msg/sensor_gps.hpp>
+#else
+#include <px4_msgs/msg/sensor_gnss.hpp>
+#include <px4_msgs/msg/vehicle_gnss.hpp>
+#endif
 #include <px4_msgs/msg/vehicle_local_position.hpp>
 #include <px4_msgs/msg/vehicle_odometry.hpp>
 #include <px4_msgs/msg/vehicle_status.hpp>
+#include <px4_msgs/msg/vehicle_command.hpp>
+#include <px4_msgs/msg/vehicle_command_ack.hpp>
 
+#include <array>
 #include <chrono>
 #include <cmath>
 #include <cstdint>
 #include <functional>
 #include <limits>
 #include <memory>
+#include <stdexcept>
 #include <string>
+#include <utility>
 
 class Px4InterfaceNode : public rclcpp::Node
 {
@@ -25,6 +37,31 @@ public:
     Px4InterfaceNode()
         : Node("px4_interface_node")
     {
+        // These settings define the command endpoint and cannot change during
+        // a request. Source IDs must be reserved for this node on the vehicle.
+        rcl_interfaces::msg::ParameterDescriptor startup_only;
+        startup_only.read_only = true;
+        const auto id_parameter = [this, &startup_only](const char * name, int value) {
+            const auto id = declare_parameter<int>(name, value, startup_only);
+            if (id < 1 || id > 255) {
+                throw std::invalid_argument(std::string(name) + " must be in [1, 255]");
+            }
+            return static_cast<uint8_t>(id);
+        };
+        target_system_ = id_parameter("target_system", 1);
+        target_component_ = id_parameter("target_component", 1);
+        source_system_ = id_parameter("source_system", 1);
+        source_component_ = id_parameter("source_component", 191);
+        const auto timeout_parameter = [this, &startup_only](const char * name, int value) {
+            const auto timeout = declare_parameter<int>(name, value, startup_only);
+            if (timeout < 100 || timeout > 60000) {
+                throw std::invalid_argument(std::string(name) + " must be in [100, 60000] ms");
+            }
+            return std::chrono::milliseconds(timeout);
+        };
+        ack_timeout_ = timeout_parameter("ack_timeout_ms", 2000);
+        mode_timeout_ = timeout_parameter("mode_timeout_ms", 5000);
+
         // PX4 telemetry uses best-effort sensor-data QoS. A subscriber with
         // incompatible reliable-only QoS might never receive these messages.
         const auto px4_qos = rclcpp::SensorDataQoS();
@@ -57,8 +94,8 @@ public:
                     std::placeholders::_1));
 
         gps_subscription_ =
-            create_subscription<px4_msgs::msg::SensorGps>(
-                "/fmu/out/vehicle_gps_position",
+            create_subscription<GpsMessage>(
+                gps_topic(),
                 px4_qos,
                 std::bind(
                     &Px4InterfaceNode::gps_callback,
@@ -81,6 +118,24 @@ public:
                 "/drone/state",
                 rclcpp::QoS(10).reliable());
 
+        command_publisher_ = create_publisher<px4_msgs::msg::VehicleCommand>(
+            "/fmu/in/vehicle_command", rclcpp::QoS(10).reliable());
+        command_ack_subscription_ = create_subscription<px4_msgs::msg::VehicleCommandAck>(
+            "/fmu/out/vehicle_command_ack_v1", px4_qos,
+            std::bind(&Px4InterfaceNode::command_ack_callback, this, std::placeholders::_1));
+
+        // Defer the response, leaving the executor free to receive ACKs and
+        // telemetry. All callbacks use the default mutually exclusive group.
+        mode_service_ = create_service<SetFlightMode>(
+            "/drone/set_flight_mode",
+            [this](std::shared_ptr<rmw_request_id_t> header,
+                   SetFlightMode::Request::SharedPtr request) {
+                request_flight_mode(header, request);
+            });
+        command_timer_ = create_wall_timer(
+            std::chrono::milliseconds(20),
+            std::bind(&Px4InterfaceNode::check_mode_request, this));
+
         // Publish one assembled snapshot every 100 ms (10 Hz), independent of
         // the different arrival rates of the five PX4 topics.
         publish_timer_ = create_wall_timer(
@@ -89,41 +144,201 @@ public:
 
         RCLCPP_INFO(
             get_logger(),
-            "Read-only PX4 interface started; publishing /drone/state at 10 Hz.");
+            "PX4 interface started; publishing /drone/state at 10 Hz; "
+            "flight-mode service: /drone/set_flight_mode.");
     }
 
 private:
     using SteadyTimePoint = std::chrono::steady_clock::time_point;
+    using SetFlightMode = px4_interface_node::srv::SetFlightMode;
+    using ModeResponse = SetFlightMode::Response;
+    using CommandAck = px4_msgs::msg::VehicleCommandAck;
+#if __has_include(<px4_msgs/msg/sensor_gps.hpp>)
+    using GpsMessage = px4_msgs::msg::SensorGps;
+#else
+    using GpsMessage = px4_msgs::msg::VehicleGnss;
+#endif
+
+    static const char * gps_topic()
+    {
+#if __has_include(<px4_msgs/msg/sensor_gps.hpp>)
+        return "/fmu/out/vehicle_gps_position";
+#else
+        return "/fmu/out/vehicle_gnss";
+#endif
+    }
+
+    struct FlightMode
+    {
+        const char * name;
+        uint8_t nav_state;
+        float main_mode;
+        float sub_mode;
+    };
+
+    static const std::array<FlightMode, 11> & flight_modes()
+    {
+        using VehicleStatus = px4_msgs::msg::VehicleStatus;
+        // DO_SET_MODE param2/param3 are PX4 custom main/sub modes, NOT nav_state.
+        // Values are defined in PX4's src/modules/commander/px4_custom_mode.h.
+        static const std::array<FlightMode, 11> modes{{
+            {"MANUAL", VehicleStatus::NAVIGATION_STATE_MANUAL, 1.0F, 0.0F},
+            {"ALTITUDE", VehicleStatus::NAVIGATION_STATE_ALTCTL, 2.0F, 0.0F},
+            {"POSITION", VehicleStatus::NAVIGATION_STATE_POSCTL, 3.0F, 0.0F},
+            {"MISSION", VehicleStatus::NAVIGATION_STATE_AUTO_MISSION, 4.0F, 4.0F},
+            {"LOITER", VehicleStatus::NAVIGATION_STATE_AUTO_LOITER, 4.0F, 3.0F},
+            {"RTL", VehicleStatus::NAVIGATION_STATE_AUTO_RTL, 4.0F, 5.0F},
+            {"OFFBOARD", VehicleStatus::NAVIGATION_STATE_OFFBOARD, 6.0F, 0.0F},
+            {"STABILIZED", VehicleStatus::NAVIGATION_STATE_STAB, 7.0F, 0.0F},
+            {"TAKEOFF", VehicleStatus::NAVIGATION_STATE_AUTO_TAKEOFF, 4.0F, 2.0F},
+            {"LAND", VehicleStatus::NAVIGATION_STATE_AUTO_LAND, 4.0F, 6.0F},
+            {"PRECISION_LAND", VehicleStatus::NAVIGATION_STATE_AUTO_PRECLAND, 4.0F, 9.0F},
+        }};
+        return modes;
+    }
 
     std::string flight_mode_name(uint8_t nav_state) const
     {
-        using VehicleStatus = px4_msgs::msg::VehicleStatus;
+        for (const auto & mode : flight_modes()) {
+            if (mode.nav_state == nav_state) {
+                return mode.name;
+            }
+        }
+        return "UNKNOWN";
+    }
 
-        switch (nav_state) {
-            case VehicleStatus::NAVIGATION_STATE_MANUAL:
-                return "MANUAL";
-            case VehicleStatus::NAVIGATION_STATE_ALTCTL:
-                return "ALTITUDE";
-            case VehicleStatus::NAVIGATION_STATE_POSCTL:
-                return "POSITION";
-            case VehicleStatus::NAVIGATION_STATE_AUTO_MISSION:
-                return "MISSION";
-            case VehicleStatus::NAVIGATION_STATE_AUTO_LOITER:
-                return "LOITER";
-            case VehicleStatus::NAVIGATION_STATE_AUTO_RTL:
-                return "RTL";
-            case VehicleStatus::NAVIGATION_STATE_OFFBOARD:
-                return "OFFBOARD";
-            case VehicleStatus::NAVIGATION_STATE_STAB:
-                return "STABILIZED";
-            case VehicleStatus::NAVIGATION_STATE_AUTO_TAKEOFF:
-                return "TAKEOFF";
-            case VehicleStatus::NAVIGATION_STATE_AUTO_LAND:
-                return "LAND";
-            case VehicleStatus::NAVIGATION_STATE_AUTO_PRECLAND:
-                return "PRECISION_LAND";
-            default:
-                return "UNKNOWN";
+    struct PendingMode
+    {
+        std::shared_ptr<rmw_request_id_t> header;
+        const FlightMode * mode;
+        SteadyTimePoint deadline;
+        uint64_t status_timestamp_at_request;
+        uint64_t ack_timestamp{0};
+        uint8_t ack_result{ModeResponse::NO_ACK};
+        bool accepted{false};
+    };
+
+    void send_mode_response(
+        const std::shared_ptr<rmw_request_id_t> & header, uint8_t result,
+        bool accepted, uint8_t ack_result, const std::string & message)
+    {
+        ModeResponse response;
+        response.success = result == ModeResponse::SUCCESS;
+        response.accepted = accepted;
+        response.result = result;
+        response.ack_result = ack_result;
+        response.current_mode = flight_mode_;
+        response.status_fresh = is_fresh(
+            has_status_, last_status_rx_, status_timeout_, std::chrono::steady_clock::now());
+        response.message = message;
+        mode_service_->send_response(*header, response);
+    }
+
+    void finish_mode_request(uint8_t result, const std::string & message)
+    {
+        auto completed = std::move(pending_mode_);
+        RCLCPP_INFO(get_logger(), "Mode %s: %s", completed->mode->name, message.c_str());
+        send_mode_response(
+            completed->header, result, completed->accepted, completed->ack_result, message);
+    }
+
+    void request_flight_mode(
+        const std::shared_ptr<rmw_request_id_t> & header,
+        const SetFlightMode::Request::SharedPtr & request)
+    {
+        check_mode_request();
+        const FlightMode * requested_mode = nullptr;
+        for (const auto & mode : flight_modes()) {
+            if (request->mode == mode.name) {
+                requested_mode = &mode;
+                break;
+            }
+        }
+        if (!requested_mode) {
+            send_mode_response(header, ModeResponse::INVALID_MODE, false,
+                ModeResponse::NO_ACK, "Unsupported flight mode: " + request->mode);
+            return;
+        }
+        if (pending_mode_) {
+            send_mode_response(header, ModeResponse::BUSY, false,
+                ModeResponse::NO_ACK, "Another flight-mode request is pending");
+            return;
+        }
+        const auto steady_now = std::chrono::steady_clock::now();
+        if (!is_fresh(has_status_, last_status_rx_, status_timeout_, steady_now)) {
+            send_mode_response(header, ModeResponse::STATUS_UNAVAILABLE, false,
+                ModeResponse::NO_ACK, "No fresh VehicleStatus from the target PX4");
+            return;
+        }
+
+        pending_mode_ = std::make_unique<PendingMode>(PendingMode{
+            header, requested_mode, steady_now + ack_timeout_, last_status_timestamp_});
+
+        px4_msgs::msg::VehicleCommand command;
+        command.timestamp = static_cast<uint64_t>(now().nanoseconds() / 1000);
+        command.command = px4_msgs::msg::VehicleCommand::VEHICLE_CMD_DO_SET_MODE;
+        command.param1 = 1.0F;  // MAV_MODE_FLAG_CUSTOM_MODE_ENABLED
+        command.param2 = requested_mode->main_mode;
+        command.param3 = requested_mode->sub_mode;
+        command.target_system = target_system_;
+        command.target_component = target_component_;
+        command.source_system = source_system_;
+        command.source_component = source_component_;
+        command.confirmation = 0;
+        command.from_external = true;
+        command_publisher_->publish(command);
+    }
+
+    void command_ack_callback(CommandAck::SharedPtr msg)
+    {
+        check_mode_request();
+        if (!pending_mode_ || pending_mode_->accepted ||
+            msg->command != px4_msgs::msg::VehicleCommand::VEHICLE_CMD_DO_SET_MODE ||
+            msg->target_system != source_system_ ||
+            msg->target_component != source_component_ || msg->from_external ||
+            msg->timestamp <= pending_mode_->status_timestamp_at_request ||
+            msg->timestamp <= pending_mode_->ack_timestamp)
+        {
+            return;
+        }
+        pending_mode_->ack_result = msg->result;
+        pending_mode_->ack_timestamp = msg->timestamp;
+        if (msg->result == CommandAck::VEHICLE_CMD_RESULT_IN_PROGRESS) {
+            // Keep waiting for a terminal ACK without extending the deadline.
+            return;
+        }
+        if (msg->result != CommandAck::VEHICLE_CMD_RESULT_ACCEPTED) {
+            finish_mode_request(ModeResponse::REJECTED,
+                "PX4 rejected the mode command (ACK result " + std::to_string(msg->result) + ")");
+            return;
+        }
+        pending_mode_->accepted = true;
+        pending_mode_->deadline = std::chrono::steady_clock::now() + mode_timeout_;
+        check_mode_request();
+    }
+
+    void check_mode_request()
+    {
+        if (!pending_mode_) {
+            return;
+        }
+        const auto steady_now = std::chrono::steady_clock::now();
+        if (steady_now >= pending_mode_->deadline) {
+            const bool accepted = pending_mode_->accepted;
+            finish_mode_request(
+                accepted ? ModeResponse::MODE_TIMEOUT : ModeResponse::ACK_TIMEOUT,
+                accepted ? "PX4 accepted, but fresh status did not confirm mode entry" :
+                "Timed out waiting for a terminal PX4 acknowledgment");
+            return;
+        }
+        // Status and ACKs can arrive in either order on different DDS topics.
+        // Compare their PX4 timestamps, never PX4 timestamps against ROS time.
+        if (pending_mode_->accepted &&
+            is_fresh(has_status_, last_status_rx_, status_timeout_, steady_now) &&
+            last_status_timestamp_ >= pending_mode_->ack_timestamp &&
+            nav_state_ == pending_mode_->mode->nav_state)
+        {
+            finish_mode_request(ModeResponse::SUCCESS, "PX4 accepted and entered the requested mode");
         }
     }
 
@@ -140,6 +355,9 @@ private:
 
     void status_callback(px4_msgs::msg::VehicleStatus::SharedPtr msg)
     {
+        if (msg->system_id != target_system_ || msg->component_id != target_component_) {
+            return;
+        }
         armed_ =
             msg->arming_state ==
             px4_msgs::msg::VehicleStatus::ARMING_STATE_ARMED;
@@ -148,6 +366,8 @@ private:
 
         last_status_rx_ = std::chrono::steady_clock::now();
         has_status_ = true;
+        last_status_timestamp_ = msg->timestamp;
+        check_mode_request();
     }
 
     void local_position_callback(
@@ -181,14 +401,23 @@ private:
         has_odometry_ = true;
     }
 
-    void gps_callback(px4_msgs::msg::SensorGps::SharedPtr msg)
+    void gps_callback(GpsMessage::SharedPtr msg)
     {
         // A 3D or better fix plus finite coordinates is sufficient for this
-        // first simplified GPS-valid signal.
+        // simplified GPS-valid signal. New PX4 firmware also reports whether
+        // the selected GNSS receiver passed its checks.
+#if __has_include(<px4_msgs/msg/sensor_gps.hpp>)
         gps_valid_ =
             msg->fix_type >= px4_msgs::msg::SensorGps::FIX_TYPE_3D &&
             std::isfinite(msg->latitude_deg) &&
             std::isfinite(msg->longitude_deg);
+#else
+        gps_valid_ =
+            msg->usable &&
+            msg->receiver.fix_type >= px4_msgs::msg::SensorGnss::FIX_TYPE_3D &&
+            std::isfinite(msg->receiver.latitude) &&
+            std::isfinite(msg->receiver.longitude);
+#endif
 
         last_gps_rx_ = std::chrono::steady_clock::now();
         has_gps_ = true;
@@ -271,7 +500,7 @@ private:
         local_position_subscription_;
     rclcpp::Subscription<px4_msgs::msg::VehicleOdometry>::SharedPtr
         odometry_subscription_;
-    rclcpp::Subscription<px4_msgs::msg::SensorGps>::SharedPtr
+    rclcpp::Subscription<GpsMessage>::SharedPtr
         gps_subscription_;
     rclcpp::Subscription<px4_msgs::msg::BatteryStatus>::SharedPtr
         battery_subscription_;
@@ -280,6 +509,19 @@ private:
     rclcpp::Publisher<px4_interface_node::msg::DroneState>::SharedPtr
         state_publisher_;
     rclcpp::TimerBase::SharedPtr publish_timer_;
+
+    rclcpp::Publisher<px4_msgs::msg::VehicleCommand>::SharedPtr command_publisher_;
+    rclcpp::Subscription<CommandAck>::SharedPtr command_ack_subscription_;
+    rclcpp::Service<SetFlightMode>::SharedPtr mode_service_;
+    rclcpp::TimerBase::SharedPtr command_timer_;
+    std::unique_ptr<PendingMode> pending_mode_;
+    uint8_t target_system_{1};
+    uint8_t target_component_{1};
+    uint8_t source_system_{1};
+    uint8_t source_component_{191};
+    std::chrono::milliseconds ack_timeout_{2000};
+    std::chrono::milliseconds mode_timeout_{5000};
+    uint64_t last_status_timestamp_{0};
 
     // Cached normalized values. NaN means no valid measurement is known yet.
     bool armed_{false};
