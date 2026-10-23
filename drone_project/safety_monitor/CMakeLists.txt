@@ -24,6 +24,16 @@ target_include_directories(safety_monitor_node PRIVATE include)
 ament_target_dependencies(safety_monitor_node rclcpp rcl_interfaces px4_interface_node)
 target_link_libraries(safety_monitor_node "${cpp_typesupport_target}")
 
+# Export the reusable header with an interface target. Consumers of a package
+# that also generates messages use imported targets rather than legacy includes.
+add_library(safety_gate INTERFACE)
+target_include_directories(safety_gate INTERFACE
+  $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+  $<INSTALL_INTERFACE:include>)
+target_link_libraries(safety_gate INTERFACE "${cpp_typesupport_target}")
+install(TARGETS safety_gate EXPORT export_safety_gate)
+ament_export_targets(export_safety_gate)
+
 install(TARGETS safety_monitor_node DESTINATION lib/${PROJECT_NAME})
 install(PROGRAMS tools/sitl_observe.py DESTINATION lib/${PROJECT_NAME})
 install(DIRECTORY include/ DESTINATION include)

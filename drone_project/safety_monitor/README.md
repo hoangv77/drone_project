@@ -98,10 +98,11 @@ remove the freshness requirement to work around a schema mismatch.
 
 ## State machine integration
 
-There is no `state_machine_manager` package in this repository yet. The exported
-`safety_monitor/safety_gate.hpp` implements its transition gate, including a
-500 ms receipt timeout. Add `safety_monitor` as a dependency and subscribe with
-depth 1, volatile QoS. Keep the subscription alive as a node member:
+The [state_machine_manager](../state_machine_manager/README.md) package uses the
+exported `safety_monitor/safety_gate.hpp` for its transition checks, including a
+500 ms default receipt timeout. Other consumers can add `safety_monitor` as a
+dependency and subscribe with depth 1, volatile QoS. Keep the subscription alive
+as a node member:
 
 ```cpp
 safety_monitor::SafetyGate safety_gate_;
