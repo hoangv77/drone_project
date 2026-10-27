@@ -37,6 +37,8 @@ struct Config
   Milliseconds recovery_timeout{30000};
   bool enable_stage_feedback{false};
   bool allow_flight_warnings{false};
+  // Opt-in SITL integration. Default passive behavior is preserved.
+  bool native_throw_launch{false};
 };
 
 struct Result {bool accepted; std::string reason;};
@@ -55,6 +57,8 @@ public:
   Result abort(Time now);
   Result reset(Time now);
   void tick(Time now);
+  void confirm_launch_arming() {arming_confirmed_ = true;}
+  void set_external_command_pending(bool pending) {external_command_pending_ = pending;}
   Mission snapshot(Time now) const;
   static const char * state_name(uint8_t state);
 
@@ -87,6 +91,8 @@ private:
   Time last_tag_rx_{};
   Time handoff_started_{};
   bool handoff_pending_{false};
+  bool arming_confirmed_{false};
+  bool external_command_pending_{false};
   uint64_t next_mission_id_;
   uint64_t last_observation_{0};
   uint8_t pending_result_{Mission::RESULT_FAILED};

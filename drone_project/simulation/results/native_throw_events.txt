@@ -1,0 +1,5 @@
+valid-20261026-165612-sitl.log
+INFO  [commander] Armed by external command	
+INFO  [commander] Takeoff detected	
+INFO  [MulticopterThrowLaunch] Throw detected, motors will start once falling
+INFO  [MulticopterThrowLaunch] Throw and fall detected, starting motors

@@ -1,5 +1,12 @@
 # State machine manager
 
+Phase 6 also supplies the opt-in `throw_launch_manager` executable and
+`throw_sitl.launch.py`. It uses this mission core plus the existing guarded
+command service. See the [SITL guide](../simulation/README.md) for measurements,
+configuration, build commands, and tests. Run one manager at a time. The
+`state_machine_manager` executable and `mission.launch.py` described below
+retain their passive behavior.
+
 A separate ROS 2 Humble C++ package for deterministic high-level mission
 decisions. It reuses the repository's `px4_interface_node/msg/DroneState`,
 `safety_monitor/msg/SafetyStatus`, and exported `safety_monitor::SafetyGate`.
@@ -7,7 +14,7 @@ The pure `MissionMachine` core has an injected monotonic clock and no ROS node
 or flight-control dependency. The node owns subscriptions, services, timers,
 state publication, and structured transition logs.
 
-This version observes externally controlled flight stages. It cannot arm,
+The default executable observes externally controlled flight stages. It cannot arm,
 disarm, change modes, drive motors, or publish Offboard setpoints. There are no
 PX4 command clients or FMU input publishers. `entry_action` is informational;
 it is not an executable controller request. Starting a mission does not start
@@ -15,7 +22,7 @@ the motors or request any flight mode.
 
 ## Build and launch
 
-Use the existing feature branch `hoang/implement_system_machine_manager`.
+Phase 6 work is on `codex/phase6-throw-launch`.
 Place all three packages in a ROS workspace with firmware-compatible
 `px4_msgs`, install dependencies through `rosdep`, then:
 

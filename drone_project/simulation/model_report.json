@@ -1,0 +1,96 @@
+{
+  "base_mass_kg": 0.3380000000000001,
+  "total_mass_kg": 0.3500000000000001,
+  "base_cg_m": [
+    0.0,
+    0.0,
+    0.02112426035502958
+  ],
+  "base_inertia_kg_m2": [
+    [
+      0.0008899099481657556,
+      0.0,
+      0.0
+    ],
+    [
+      0.0,
+      0.00033977661464575543,
+      0.0
+    ],
+    [
+      0.0,
+      0.0,
+      0.0011432963339466668
+    ]
+  ],
+  "hover_throttle_estimate": 0.6904434464731909,
+  "impulse_N_s": [
+    0.14000000000000004,
+    0.0,
+    2.2750000000000004
+  ],
+  "push_duration_s": 0.2,
+  "average_hand_force_N": [
+    0.7000000000000002,
+    0.0,
+    14.805000000000003
+  ],
+  "scenario": "valid",
+  "assumptions": {
+    "status": "PROVISIONAL SITL MODEL: motor centers and flight weight absent from CAD",
+    "body_frame": "FLU: x forward, y left, z up; CAD axes retained provisionally",
+    "frame_mass_kg": 0.08,
+    "electronics_mass_kg": 0.05,
+    "battery_mass_kg": 0.14,
+    "battery_size_m": [
+      0.06,
+      0.03,
+      0.025
+    ],
+    "battery_position_m": [
+      0.0,
+      0.0,
+      0.03
+    ],
+    "motor_mass_kg_each": 0.017,
+    "prop_mass_kg_each": 0.003,
+    "motor_positions_flu_m": [
+      [
+        0.055,
+        -0.1,
+        0.025
+      ],
+      [
+        -0.055,
+        0.1,
+        0.025
+      ],
+      [
+        0.055,
+        0.1,
+        0.025
+      ],
+      [
+        -0.055,
+        -0.1,
+        0.025
+      ]
+    ],
+    "prop_diameter_m": 0.0762,
+    "motor_constant_N_s2_rad2": 1.8e-06,
+    "moment_constant_m": 0.016,
+    "max_rot_velocity_rad_s": 1000,
+    "time_constant_up_s": 0.025,
+    "time_constant_down_s": 0.05,
+    "rotor_drag_coefficient": 1e-05,
+    "sensor_pose_flu_m": [
+      0,
+      0,
+      0
+    ],
+    "battery_electrical": "unknown; PX4 battery simulator is nominal and does not model sag",
+    "esc_motor_prop_manufacturer": null,
+    "aerodynamics": "unidentified; provisional rotor drag only, no calibrated body drag"
+  },
+  "sensor_source_sha256": "6eccbff824a0e1ceaaf3bc12fe18cd0eb3ece890bf995a2607b477c3d2ae5772"
+}
