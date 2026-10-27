@@ -1,0 +1,10 @@
+Starting >>> px4_interface_node
+[1.143s] WARNING:colcon.colcon_ros.prefix_path.ament:The path '/tmp/drone-phase6-matched-install/px4_msgs' in the environment variable AMENT_PREFIX_PATH doesn't contain any 'local_setup.*' files.
+Finished <<< px4_interface_node [21.9s]
+Starting >>> safety_monitor
+Finished <<< safety_monitor [17.0s]
+Starting >>> state_machine_manager
+Finished <<< state_machine_manager [21.8s]
+
+Summary: 3 packages finished [1min 1s]
+Summary: 129 tests, 0 errors, 0 failures, 0 skipped

@@ -154,6 +154,7 @@ class TestSafetyPipeline(unittest.TestCase):
     def test_00_startup_unknown(self):
         # The adapter is alive but its source flags are all stale: BLOCKED.
         # A monitor with no adapter input at all remains UNKNOWN.
+        self.until(lambda: self.statuses[-1].level == S.BLOCKED)
         self.assertEqual(self.statuses[-1].level, S.BLOCKED)
         self.assertEqual(self.statuses[-1].phase, S.PHASE_UNKNOWN)
         self.assertEqual(self.direct_statuses[-1].level, S.UNKNOWN)

@@ -1,0 +1,8 @@
+{
+  "passed": true,
+  "peak_altitude_m": 3.9880719467621906,
+  "request_to_apex_sim_s": 1.068,
+  "descent_after_apex_m": 0.9604320272379443,
+  "samples": 76,
+  "px4_connected": false
+}

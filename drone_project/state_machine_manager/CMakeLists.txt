@@ -10,10 +10,11 @@ find_package(std_srvs REQUIRED)
 find_package(builtin_interfaces REQUIRED)
 find_package(px4_interface_node REQUIRED)
 find_package(safety_monitor REQUIRED)
+find_package(px4_msgs REQUIRED)
 find_package(rosidl_default_generators REQUIRED)
 find_package(rosidl_typesupport_cpp REQUIRED)
 rosidl_generate_interfaces(${PROJECT_NAME}
-  "msg/MissionState.msg" "msg/StageFeedback.msg"
+  "msg/MissionState.msg" "msg/StageFeedback.msg" "msg/NativeLaunchStatus.msg"
   DEPENDENCIES builtin_interfaces)
 rosidl_get_typesupport_target(cpp_typesupport_target ${PROJECT_NAME} "rosidl_typesupport_cpp")
 
@@ -29,10 +30,14 @@ set_target_properties(state_machine_manager_node PROPERTIES OUTPUT_NAME state_ma
 target_compile_features(state_machine_manager_node PUBLIC cxx_std_17)
 ament_target_dependencies(state_machine_manager_node rclcpp rcl_interfaces std_srvs)
 target_link_libraries(state_machine_manager_node mission_machine)
+add_executable(throw_launch_manager src/throw_launch_node.cpp)
+target_compile_features(throw_launch_manager PUBLIC cxx_std_17)
+ament_target_dependencies(throw_launch_manager rclcpp std_srvs px4_msgs)
+target_link_libraries(throw_launch_manager mission_machine)
 install(TARGETS mission_machine
   EXPORT export_mission_machine
   ARCHIVE DESTINATION lib LIBRARY DESTINATION lib)
-install(TARGETS state_machine_manager_node RUNTIME DESTINATION lib/${PROJECT_NAME})
+install(TARGETS state_machine_manager_node throw_launch_manager RUNTIME DESTINATION lib/${PROJECT_NAME})
 install(DIRECTORY include/ DESTINATION include)
 install(DIRECTORY launch config DESTINATION share/${PROJECT_NAME})
 ament_export_include_directories(include)
@@ -45,5 +50,6 @@ if(BUILD_TESTING)
   target_link_libraries(test_mission_machine mission_machine)
   find_package(launch_testing_ament_cmake REQUIRED)
   add_launch_test(test/test_mission_node.py TIMEOUT 120)
+  add_launch_test(test/test_throw_node.py TIMEOUT 120)
 endif()
 ament_package()

@@ -1,5 +1,10 @@
 # drone_project
 
+Phase 6 adds an opt-in [native throw-launch SITL integration](simulation/README.md)
+with a CAD-envelope-based provisional model, project-local PX4 parameters,
+physical release fixture and repeatable tests. Existing passive launches remain
+available. Hardware mass and propulsion measurements are still required.
+
 ROS 2 interface that publishes PX4 state at 10 Hz and provides guarded mode,
 arm, disarm, and preflight-check commands. Success requires both a terminal
 PX4 `ACCEPTED` acknowledgment and fresh telemetry confirming the result.

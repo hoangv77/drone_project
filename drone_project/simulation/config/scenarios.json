@@ -1,0 +1,10 @@
+{
+  "valid": {"height_m": 1.2, "velocity_enu_m_s": [0.4, 0, 6.5], "rpy_rad": [0.08, -0.05, 0], "expect": "stabilized"},
+  "below_threshold": {"height_m": 0.6, "velocity_enu_m_s": [0, 0, 2.0], "rpy_rad": [0, 0, 0], "expect": "no_detection_before_impact"},
+  "unfavorable_orientation": {"height_m": 1.2, "velocity_enu_m_s": [0.4, 0, 6.5], "rpy_rad": [2.8, 0, 0], "expect": "record_recovery_or_stabilization"},
+  "launch_timeout": {"height_m": 1.2, "velocity_enu_m_s": [0, 0, 0], "rpy_rad": [0, 0, 0], "release": false, "expect": "failed_disarmed"},
+  "operator_abort": {"height_m": 1.2, "velocity_enu_m_s": [0, 0, 6.5], "rpy_rad": [0, 0, 0], "release": false, "expect": "aborted_disarmed"},
+  "command_rejection": {"height_m": 1.2, "velocity_enu_m_s": [0, 0, 6.5], "rpy_rad": [0, 0, 0], "release": false, "expect": "mock_command_rejection"},
+  "safety_denial": {"height_m": 1.2, "velocity_enu_m_s": [0, 0, 6.5], "rpy_rad": [0, 0, 0], "release": false, "expect": "start_rejected"},
+  "communication_loss": {"height_m": 1.2, "velocity_enu_m_s": [0, 0, 6.5], "rpy_rad": [0, 0, 0], "release": false, "expect": "recovery_or_fault"}
+}

@@ -536,3 +536,56 @@ TEST(MissionConfiguration, NonpositiveTimeoutRejected)
   config.search_timeout = sm::Milliseconds(0);
   EXPECT_THROW(sm::MissionMachine{config}, std::invalid_argument);
 }
+
+TEST_F(MissionTest, NativeIntegrationRequiresArmingAcknowledgment)
+{
+  config.native_throw_launch = true;
+  sm::MissionMachine core(config, now);
+  core.receive_drone(drone, now); core.receive_safety(safety, now);
+  ASSERT_TRUE(core.start(now).accepted);
+  drone.command_pending = true; drone.ready_to_arm = false;
+  core.receive_drone(drone, now); core.tick(now);
+  EXPECT_EQ(core.snapshot(now).current_state, M::PREFLIGHT);
+  drone.command_pending = false; drone.armed = true;
+  safety.phase = S::FLIGHT; safety.autonomous_flight_permitted = true;
+  core.receive_drone(drone, now); core.receive_safety(safety, now); core.tick(now);
+  EXPECT_EQ(core.snapshot(now).current_state, M::PREFLIGHT);
+  core.confirm_launch_arming(); core.tick(now);
+  EXPECT_EQ(core.snapshot(now).current_state, M::ARMED_WAITING);
+}
+
+TEST_F(MissionTest, AbortBeforePendingTelemetryCannotCompleteWithCachedDisarmedState)
+{
+  ASSERT_TRUE(machine.start(now).accepted);
+  machine.set_external_command_pending(true);
+  ASSERT_TRUE(machine.abort(now).accepted);
+  EXPECT_EQ(state().current_state, M::RECOVERY);
+  machine.tick(now);
+  EXPECT_EQ(state().current_state, M::RECOVERY);
+  drone.armed = true; sync();
+  machine.set_external_command_pending(false); machine.tick(now);
+  EXPECT_EQ(state().current_state, M::RECOVERY);
+  ground(); machine.tick(now);
+  EXPECT_EQ(state().current_state, M::ABORTED);
+}
+
+TEST_F(MissionTest, NativeIntegrationCompletesInAirborneHoldWithoutTagSearch)
+{
+  config.native_throw_launch = true;
+  sm::MissionMachine core(config, now);
+  core.receive_drone(drone, now); core.receive_safety(safety, now);
+  ASSERT_TRUE(core.start(now).accepted);
+  drone.armed = true; safety.phase = S::FLIGHT; safety.autonomous_flight_permitted = true;
+  core.receive_drone(drone, now); core.receive_safety(safety, now);
+  core.confirm_launch_arming(); core.tick(now);
+  drone.landed = false; core.receive_drone(drone, now);
+  for (auto event : {F::THROW_DETECTED, F::LAUNCH_COMPLETE, F::STABILIZED}) {
+    auto state = core.snapshot(now); F f;
+    f.event = event; f.verified = true; f.observation_sequence = 1;
+    f.mission_id = state.mission_id; f.transition_sequence = state.transition_sequence;
+    ASSERT_TRUE(core.receive_feedback(f, now).accepted); core.tick(now);
+  }
+  EXPECT_EQ(core.snapshot(now).current_state, M::STANDBY);
+  EXPECT_EQ(core.snapshot(now).mission_result, M::RESULT_SUCCEEDED);
+  EXPECT_FALSE(core.start(now).accepted);  // Airborne STANDBY cannot rearm/relaunch.
+}

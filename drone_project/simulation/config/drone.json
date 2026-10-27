@@ -1,0 +1,35 @@
+{
+  "schema_version": 1,
+  "source": "Drone Assembly.step, Autodesk export 2026-10-22",
+  "cad": {
+    "classification": "calculated from provided CAD, not a physical measurement",
+    "bounds_mm": [-40.0000001001, -75.0000001000, -3.5, 40.0000001001, 75.0000001000, 22.0000001],
+    "size_m": [0.0800000002, 0.1500000002, 0.0255000001],
+    "solid_count": 11,
+    "material_property": {"name": "Nylon 12 (with Formlabs Fuse 1 3D Printer)", "density_kg_m3": 1015, "scope": "Component9 only; not whole assembly"}
+  },
+  "assumptions": {
+    "status": "PROVISIONAL SITL MODEL: motor centers and flight weight absent from CAD",
+    "body_frame": "FLU: x forward, y left, z up; CAD axes retained provisionally",
+    "frame_mass_kg": 0.080,
+    "electronics_mass_kg": 0.050,
+    "battery_mass_kg": 0.140,
+    "battery_size_m": [0.060, 0.030, 0.025],
+    "battery_position_m": [0.0, 0.0, 0.030],
+    "motor_mass_kg_each": 0.017,
+    "prop_mass_kg_each": 0.003,
+    "motor_positions_flu_m": [[0.055, -0.10, 0.025], [-0.055, 0.10, 0.025], [0.055, 0.10, 0.025], [-0.055, -0.10, 0.025]],
+    "prop_diameter_m": 0.0762,
+    "motor_constant_N_s2_rad2": 0.0000018,
+    "moment_constant_m": 0.016,
+    "max_rot_velocity_rad_s": 1000,
+    "time_constant_up_s": 0.025,
+    "time_constant_down_s": 0.05,
+    "rotor_drag_coefficient": 0.00001,
+    "sensor_pose_flu_m": [0, 0, 0],
+    "battery_electrical": "unknown; PX4 battery simulator is nominal and does not model sag",
+    "esc_motor_prop_manufacturer": null,
+    "aerodynamics": "unidentified; provisional rotor drag only, no calibrated body drag"
+  },
+  "missing": ["measured all-up weight", "deployed motor centers and thrust axes", "component masses and locations", "measured CG", "prop diameter/pitch", "motor KV and thrust/current curve", "ESC response and limits", "battery cells/capacity/voltage/placement", "flight controller orientation and sensor offsets", "measured inertia and drag"]
+}
