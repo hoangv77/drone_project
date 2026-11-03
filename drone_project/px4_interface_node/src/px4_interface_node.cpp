@@ -44,6 +44,7 @@ public:
         // a request. Source IDs must be reserved for this node on the vehicle.
         rcl_interfaces::msg::ParameterDescriptor startup_only;
         startup_only.read_only = true;
+        read_only_ = declare_parameter("read_only", false, startup_only);
         const auto id_parameter = [this, &startup_only](const char * name, int value) {
             const auto id = declare_parameter<int>(name, value, startup_only);
             if (id < 1 || id > 255) {
@@ -139,11 +140,16 @@ public:
                 "/drone/state",
                 rclcpp::QoS(10).reliable());
 
-        command_publisher_ = create_publisher<px4_msgs::msg::VehicleCommand>(
-            "/fmu/in/vehicle_command", rclcpp::QoS(10).reliable());
-        command_ack_subscription_ = create_subscription<px4_msgs::msg::VehicleCommandAck>(
-            "/fmu/out/vehicle_command_ack_v1", px4_qos,
-            std::bind(&Px4InterfaceNode::command_ack_callback, this, std::placeholders::_1));
+        if (!read_only_) {
+            command_publisher_ = create_publisher<px4_msgs::msg::VehicleCommand>(
+                "/fmu/in/vehicle_command", rclcpp::QoS(10).reliable());
+            command_ack_subscription_ = create_subscription<px4_msgs::msg::VehicleCommandAck>(
+                "/fmu/out/vehicle_command_ack_v1", px4_qos,
+                std::bind(&Px4InterfaceNode::command_ack_callback, this, std::placeholders::_1));
+            command_timer_ = create_wall_timer(
+                std::chrono::milliseconds(20),
+                std::bind(&Px4InterfaceNode::check_command, this));
+        }
 
         // Defer the response, leaving the executor free to receive ACKs and
         // telemetry. All callbacks use the default mutually exclusive group.
@@ -174,10 +180,6 @@ public:
                         command_service_->send_response(*header, response);
                     });
             });
-        command_timer_ = create_wall_timer(
-            std::chrono::milliseconds(20),
-            std::bind(&Px4InterfaceNode::check_command, this));
-
         // Publish one assembled snapshot every 100 ms (10 Hz), independent of
         // the different arrival rates of the five PX4 topics.
         publish_timer_ = create_wall_timer(
@@ -187,10 +189,11 @@ public:
         RCLCPP_INFO(
             get_logger(),
             "PX4 interface started; publishing /drone/state at 10 Hz; "
-            "command API: /drone/execute_command; mode API: /drone/set_flight_mode.");
+            "command services %s.", read_only_ ? "disabled (read-only)" : "enabled");
     }
 
 private:
+    bool read_only_;
     using SteadyTimePoint = std::chrono::steady_clock::time_point;
     using SetFlightMode = px4_interface_node::srv::SetFlightMode;
     using ExecuteCommand = px4_interface_node::srv::ExecuteCommand;
@@ -334,6 +337,10 @@ private:
         response.request_id = ++request_sequence_;
         response.command = kind;
         response.ack_result = CommandResponse::NO_ACK;
+        if (read_only_) {
+            respond(response, CommandResponse::REJECTED, "PX4 interface is read-only", complete);
+            return;
+        }
         const FlightMode * mode = nullptr;
         if (kind == CommandRequest::SET_MODE) {
             for (const auto & candidate : flight_modes()) {
