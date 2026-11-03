@@ -1,0 +1,8 @@
+camera_gate:
+  ros__parameters:
+    image_topic: /camera/image_raw
+    info_topic: /camera/camera_info
+    optical_frame: camera_optical_frame
+    body_frame: base_link
+    max_image_age_s: 0.5
+    disconnect_timeout_s: 2.0

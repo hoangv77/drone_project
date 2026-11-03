@@ -26,6 +26,10 @@ packages=$release/source/drone_project
 python3 "$scripts/schema.py" prepare "$release" "$1" "$2"
 paths=("$release/px4_msgs" "$packages/px4_interface_node" "$packages/safety_monitor"
        "$packages/state_machine_manager")
+if [[ ${DRONE_WITH_VISION:-0} == 1 ]]; then
+    paths+=("$packages/vision")
+    touch "$release/vision.enabled"
+fi
 rosdep install --from-paths "${paths[@]}" --ignore-src --rosdistro humble -y
 export CMAKE_BUILD_PARALLEL_LEVEL=1 MAKEFLAGS=-j1
 cd "$release"

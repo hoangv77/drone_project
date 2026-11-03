@@ -28,6 +28,14 @@ for interface in px4_msgs/msg/FailsafeFlags px4_msgs/msg/VehicleStatus \
     ros2 interface show "$interface" >/dev/null
 done
 echo 'PASS installed packages, executables and ROS interfaces'
+if [[ -f $release/vision.enabled ]]; then
+    vision=$(ros2 pkg prefix drone_vision)
+    for executable in camera_gate test_camera recorder; do
+        [[ $(realpath "$vision") == "$(realpath "$release/install")" &&
+           -x $vision/lib/drone_vision/$executable ]] || die "FAIL missing vision executable $executable"
+    done
+    echo 'PASS optional vision and recording executables'
+fi
 python3 "$here/schema.py" verify "$release" "$(ros2 pkg prefix px4_msgs)"
 echo 'PASS installed schemas match the selected source revision'
 if [[ $mode == build ]]; then

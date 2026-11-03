@@ -1,5 +1,8 @@
 # CM5 passive deployment
 
+See the [optional Phase 8 vision and recording setup](../../drone_project/vision/README.md)
+for the camera, AprilTag, ROS bag and compressed video components.
+
 The CM5 runs a Micro XRCE-DDS Agent and a separate ROS 2 Humble launch under systemd as `drone-runtime`. The Agent bridges one PX4 controller. The ROS stack publishes state, safety and mission telemetry. The command API stays available for compatibility and rejects requests in read-only mode. The passive manager starts in STANDBY and rejects operator control requests. It consumes telemetry with stage feedback disabled. The launch checks the local DDS graph for competing mission managers and PX4 command publishers before starting and while running. Use one dedicated domain for this stack. Graph checks depend on discovery and supervise only this launch. Restrict access to the DDS network and the host. [Repository audit](AUDIT.md)
 
 ## Select and flash the OS
@@ -155,7 +158,8 @@ source /opt/ros/humble/setup.bash
 source "$RELEASE/install/local_setup.bash"
 CM5_TEST_ROS=1 python3 -m unittest discover -s deployment/cm5/tests -v
 CM5_TEST_SYSTEMD=1 python3 -m unittest discover -s deployment/cm5/tests -p test_systemd.py -v
-(cd "$RELEASE" && colcon test --merge-install --packages-select px4_interface_node safety_monitor state_machine_manager)
+(cd "$RELEASE" && colcon test --merge-install --base-paths px4_msgs source/drone_project \
+  --packages-select px4_interface_node safety_monitor state_machine_manager)
 (cd "$RELEASE" && colcon test-result --verbose)
 ```
 

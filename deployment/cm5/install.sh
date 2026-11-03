@@ -23,6 +23,9 @@ sudo apt-get update
 sudo apt-get install -y git build-essential cmake python3-colcon-common-extensions \
     python3-rosdep python3-yaml libspdlog-dev libssl-dev libtinyxml2-dev ros-humble-ros-base \
     ros-humble-fastrtps ros-humble-fastcdr ros-humble-rmw-fastrtps-cpp
+if [[ ${DRONE_WITH_VISION:-0} == 1 ]]; then
+    sudo apt-get install -y ffmpeg ros-humble-camera-calibration
+fi
 if ! sudo test -f /etc/ros/rosdep/sources.list.d/20-default.list; then
     sudo rosdep init
 fi

@@ -31,5 +31,15 @@ case ${1:-} in
         source_overlay "$here/../../.."
         exec ros2 launch "$here/launch/onboard.launch.py" "${@:2}"
         ;;
-    *) die "Usage: bash run.sh agent|stack [ROS launch arguments]" ;;
+    vision)
+        export PYTHONNOUSERSITE=1
+        source_overlay "$here/../../.."
+        exec ros2 launch drone_vision vision.launch.py "${@:2}"
+        ;;
+    recorder)
+        export PYTHONNOUSERSITE=1
+        source_overlay "$here/../../.."
+        exec ros2 run drone_vision recorder "${@:2}"
+        ;;
+    *) die "Usage: bash run.sh agent|stack|vision|recorder [arguments]" ;;
 esac

@@ -34,6 +34,9 @@ elif [[ $# == 3 ]]; then
     }
     trap cleanup_source EXIT
     git -C "$repo" worktree add --detach "$scratch/source" "$commit"
+    if [[ -z ${DRONE_WITH_VISION+x} && -f $state/current/vision.enabled ]]; then
+        export DRONE_WITH_VISION=1
+    fi
     if ! bash "$scratch/source/deployment/cm5/build.sh" "$2" "$3" | tee "$scratch/build.log"; then
         log "build failed commit=$commit; active release untouched"
         exit 1
