@@ -30,6 +30,7 @@ public:
     sm::Config config;
     rcl_interfaces::msg::ParameterDescriptor fixed;
     fixed.read_only = true;
+    monitor_only_ = declare_parameter("monitor_only", false, fixed);
     const auto duration = [this, &fixed](const char * name, sm::Milliseconds initial) {
         const int value = declare_parameter<int>(name, static_cast<int>(initial.count()), fixed);
         if (value < 50 || value > 86400000) {
@@ -51,7 +52,8 @@ public:
     config.tag_loss_timeout = duration("tag_loss_timeout_ms", config.tag_loss_timeout);
     config.landing_timeout = duration("landing_timeout_ms", config.landing_timeout);
     config.recovery_timeout = duration("recovery_timeout_ms", config.recovery_timeout);
-    config.enable_stage_feedback = declare_parameter("enable_stage_feedback", false, fixed);
+    config.enable_stage_feedback =
+      declare_parameter("enable_stage_feedback", false, fixed) && !monitor_only_;
     config.allow_flight_warnings = declare_parameter("allow_flight_warnings", false, fixed);
     std::random_device random;
     const uint64_t seed = (static_cast<uint64_t>(random()) << 32) ^ random();
@@ -88,6 +90,11 @@ private:
   {
     return create_service<Trigger>(name,
       [this, control, name](const Trigger::Request::SharedPtr, Trigger::Response::SharedPtr response) {
+        if (monitor_only_) {
+          response->success = false;
+          response->message = "Mission manager is monitoring only";
+          return;
+        }
         const auto result = ((*machine_).*control)(sm::Clock::now());
         response->success = result.accepted;
         response->message = result.reason;
@@ -117,6 +124,7 @@ private:
     publisher_->publish(state);
   }
   std::unique_ptr<sm::MissionMachine> machine_;
+  bool monitor_only_;
   uint64_t last_logged_{0};
   rclcpp::Publisher<sm::Mission>::SharedPtr publisher_;
   rclcpp::Subscription<sm::Drone>::SharedPtr drone_sub_;

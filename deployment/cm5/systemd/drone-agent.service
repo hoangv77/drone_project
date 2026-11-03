@@ -1,0 +1,20 @@
+[Unit]
+Description=Drone PX4 Micro XRCE-DDS Agent
+After=network.target
+StartLimitIntervalSec=0
+
+[Service]
+Type=exec
+User=drone-runtime
+SupplementaryGroups=dialout
+EnvironmentFile=/etc/drone/drone.env
+ExecStart=/bin/bash /opt/drone/state/current/source/deployment/cm5/run.sh agent
+Restart=always
+RestartSec=5s
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

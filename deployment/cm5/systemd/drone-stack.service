@@ -1,0 +1,23 @@
+[Unit]
+Description=Drone onboard passive ROS 2 stack
+Wants=drone-agent.service
+After=drone-agent.service
+StartLimitIntervalSec=0
+
+[Service]
+Type=exec
+User=drone-runtime
+StateDirectory=drone-runtime
+Environment=ROS_LOG_DIR=/var/lib/drone-runtime/log
+EnvironmentFile=/etc/drone/drone.env
+ExecStart=/bin/bash /opt/drone/state/current/source/deployment/cm5/run.sh stack
+Restart=always
+RestartSec=5s
+TimeoutStopSec=30s
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target
