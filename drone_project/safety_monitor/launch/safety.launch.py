@@ -6,6 +6,7 @@ from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument
 from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
+from launch_ros.parameter_descriptions import ParameterValue
 
 
 def generate_launch_description():
@@ -13,7 +14,12 @@ def generate_launch_description():
                  'config' / 'safety_monitor.yaml')
     return LaunchDescription([
         DeclareLaunchArgument('config', default_value=config),
-        Node(package='px4_interface_node', executable='px4_interface_node', output='screen'),
+        DeclareLaunchArgument('sitl_commands', default_value='false'),
+        Node(package='px4_interface_node', executable='px4_interface_node',
+             parameters=[{'sitl_commands': ParameterValue(LaunchConfiguration('sitl_commands'), value_type=bool)}],
+             output='screen'),
         Node(package='safety_monitor', executable='safety_monitor', name='safety_monitor',
-             parameters=[LaunchConfiguration('config')], output='screen'),
+             parameters=[LaunchConfiguration('config'), {'publish_command_safety':
+                         ParameterValue(LaunchConfiguration('sitl_commands'), value_type=bool)}],
+             output='screen'),
     ])

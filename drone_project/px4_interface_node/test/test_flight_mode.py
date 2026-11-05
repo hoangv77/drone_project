@@ -15,7 +15,7 @@ from rclpy.parameter import Parameter
 from rclpy.qos import qos_profile_sensor_data
 from rcl_interfaces.srv import SetParameters
 
-from px4_interface_node.msg import DroneState
+from px4_interface_node.msg import CommandContext, DroneState
 from px4_interface_node.srv import ExecuteCommand, SetFlightMode
 from px4_msgs.msg import VehicleCommand, VehicleCommandAck, VehicleLandDetected, VehicleStatus
 try:
@@ -53,12 +53,13 @@ def generate_test_description():
         '/drone/execute_command',
         '/fmu/out/battery_status_v1', '/fmu/out/vehicle_command_ack_v1',
         '/fmu/in/vehicle_command', '/drone/state', '/drone/set_flight_mode',
+        '/drone/command_safety', '/drone/command_mission',
     ]
     interface = launch_ros.actions.Node(
         package='px4_interface_node', executable='px4_interface_node',
         name='px4_interface_under_test',
         parameters=[{
-            'target_system': 7, 'target_component': 1,
+            'sitl_commands': True, 'target_system': 7, 'target_component': 1,
             'source_system': 42, 'source_component': 190,
             'ack_timeout_ms': 700, 'mode_timeout_ms': 700,
         }],
@@ -75,6 +76,12 @@ class TestFlightMode(unittest.TestCase):
     def setUpClass(cls):
         rclpy.init()
         cls.node = rclpy.create_node('flight_mode_test_client')
+        cls.safety_node = rclpy.create_node('safety_monitor')
+        cls.mission_node = rclpy.create_node('throw_launch_manager')
+        cls.safety = cls.safety_node.create_publisher(CommandContext, PREFIX + '/drone/command_safety', 1)
+        cls.mission = cls.mission_node.create_publisher(CommandContext, PREFIX + '/drone/command_mission', 1)
+        cls.safety_enabled = False
+        cls.safety_allowed = True
         cls.client = cls.node.create_client(SetFlightMode, SERVICE)
         cls.command_client = cls.node.create_client(ExecuteCommand, COMMAND_SERVICE)
         cls.land_pub = cls.node.create_publisher(VehicleLandDetected, LAND, qos_profile_sensor_data)
@@ -114,11 +121,15 @@ class TestFlightMode(unittest.TestCase):
 
     @classmethod
     def tearDownClass(cls):
+        cls.safety_node.destroy_node()
+        cls.mission_node.destroy_node()
         cls.node.destroy_node()
         rclpy.shutdown()
 
     def setUp(self):
         type(self).status_enabled = False
+        type(self).safety_enabled = True
+        type(self).safety_allowed = True
         type(self).status_mode = V.NAVIGATION_STATE_MANUAL
         type(self).status_armed = False
         type(self).status_intention = None
@@ -132,7 +143,7 @@ class TestFlightMode(unittest.TestCase):
 
     @staticmethod
     def px4_time():
-        return time.monotonic_ns() // 1000
+        return time.time_ns() // 1000
 
     @classmethod
     def publish_status(cls, mode, timestamp=None, system=7, component=1):
@@ -152,6 +163,12 @@ class TestFlightMode(unittest.TestCase):
 
     @classmethod
     def status_tick(cls):
+        stamp = cls.node.get_clock().now().to_msg()
+        if cls.safety_enabled:
+            cls.safety.publish(CommandContext(stamp=stamp, telemetry_healthy=True,
+                                              launch_permitted=cls.safety_allowed, recovery_eligible=True))
+        cls.mission.publish(CommandContext(stamp=stamp, phase=CommandContext.RECOVERY if cls.status_armed
+                                           else CommandContext.PREFLIGHT))
         if cls.status_enabled:
             cls.publish_status(cls.status_mode)
             if cls.land_enabled:
@@ -188,6 +205,7 @@ class TestFlightMode(unittest.TestCase):
                    (mode if self.status_intention is None else self.status_intention) and
                    (not self.land_enabled or (self.states[-1].land_detected_fresh and
                                               self.states[-1].landed == self.landed)))
+        self.spin_for(0.08)
 
     def request(self, mode='LOITER', expect_command=True):
         count = len(self.commands)
@@ -246,7 +264,8 @@ class TestFlightMode(unittest.TestCase):
         type(self).status_enabled = False
         future = self.request()
         timestamp = self.px4_time()
-        self.publish_status(V.NAVIGATION_STATE_AUTO_LOITER, timestamp + 1000)
+        self.spin_for(0.02)
+        self.publish_status(V.NAVIGATION_STATE_AUTO_LOITER)
         self.spin_for(0.1)
         self.assertFalse(future.done())
         self.ack(timestamp=timestamp)
@@ -387,6 +406,9 @@ class TestFlightMode(unittest.TestCase):
         for name, nav_state, main_mode, sub_mode in modes:
             with self.subTest(mode=name):
                 self.prepare_status()
+                if name != 'LOITER':
+                    self.response(self.request(name, expect_command=False), R.REJECTED)
+                    continue
                 future = self.request(name)
                 command = self.commands[-1]
                 self.assertEqual(command.command, VehicleCommand.VEHICLE_CMD_DO_SET_MODE)
@@ -407,9 +429,10 @@ class TestFlightMode(unittest.TestCase):
         type(self).status_enabled = False
         future = self.request()
         timestamp = self.px4_time()
-        self.publish_status(V.NAVIGATION_STATE_AUTO_LOITER, timestamp + 1000)
+        self.spin_for(0.02)
+        self.publish_status(V.NAVIGATION_STATE_AUTO_LOITER)
         self.spin_for(0.05)
-        self.publish_status(V.NAVIGATION_STATE_MANUAL, timestamp + 2000)
+        self.publish_status(V.NAVIGATION_STATE_MANUAL)
         self.spin_for(0.05)
         self.ack(timestamp=timestamp)
         self.spin_for(0.1)
@@ -466,6 +489,7 @@ class TestFlightMode(unittest.TestCase):
         self.gps_pub.publish(gps)
         self.until(lambda: self.states[-1].gps_valid and self.states[-1].gps_fresh)
         receiver.fix_type = 2
+        gps.timestamp = self.px4_time()
         self.gps_pub.publish(gps)
         self.until(lambda: not self.states[-1].gps_valid and self.states[-1].gps_fresh)
 
@@ -589,6 +613,8 @@ class TestFlightMode(unittest.TestCase):
 
     def test_31_failsafe_allows_only_recovery_modes(self):
         type(self).failsafe = True
+        type(self).status_armed = True
+        type(self).landed = False
         self.prepare_status()
         self.response(self.execute(Q.SET_MODE, 'LOITER', expect_command=False), E.FAILSAFE_ACTIVE)
         future = self.execute(Q.SET_MODE, 'LAND')
@@ -645,6 +671,77 @@ class TestFlightMode(unittest.TestCase):
         future = self.request()
         self.ack()
         self.response(future, E.TRANSITION_TIMEOUT, True, A.VEHICLE_CMD_RESULT_ACCEPTED)
+
+    def test_36_boundary_rejects_blocked_and_stale_safety(self):
+        self.prepare_status()
+        count = len(self.commands)
+        type(self).safety_allowed = False
+        self.spin_for(0.12)
+        self.response(self.execute(Q.ARM, expect_command=False), E.REJECTED)
+        type(self).safety_enabled = False
+        self.spin_for(0.6)
+        self.response(self.execute(Q.ARM, expect_command=False), E.REJECTED)
+        self.assertEqual(len(self.commands), count)
+
+    def test_37_repeated_and_future_samples_do_not_renew_status(self):
+        self.prepare_status()
+        type(self).status_enabled = False
+        old = self.px4_time()
+        self.publish_status(V.NAVIGATION_STATE_MANUAL, old)
+        self.spin_for(0.1)
+        for _ in range(22):
+            self.publish_status(V.NAVIGATION_STATE_MANUAL, old)
+            self.publish_status(V.NAVIGATION_STATE_MANUAL, old - 1)
+            self.publish_status(V.NAVIGATION_STATE_MANUAL, self.px4_time() + 1000000)
+            self.spin_for(0.1)
+        self.assertFalse(self.states[-1].status_fresh)
+        self.prepare_status()
+
+
+    def test_38_prior_ack_and_status_above_old_watermark_cannot_confirm_retry(self):
+        self.prepare_status()
+        type(self).status_enabled = False
+        first = self.request()
+        old_ack = self.px4_time()
+        self.spin_for(0.03)
+        old_status = self.px4_time()
+        self.response(first, R.ACK_TIMEOUT)
+        retry = self.request()
+        self.ack(timestamp=old_ack)
+        self.publish_status(V.NAVIGATION_STATE_AUTO_LOITER, old_status)
+        self.spin_for(0.12)
+        self.assertFalse(retry.done())
+        self.ack()
+        self.spin_for(0.05)
+        self.assertFalse(retry.done())
+        self.publish_status(V.NAVIGATION_STATE_AUTO_LOITER)
+        self.response(retry, R.SUCCESS, True, A.VEHICLE_CMD_RESULT_ACCEPTED)
+
+    def test_39_safety_restart_and_duplicate_writer_fail_closed(self):
+        self.prepare_status()
+        count = len(self.commands)
+        topic = PREFIX + '/drone/command_safety'
+        cls = type(self)
+        cls.safety_enabled = False
+        cls.safety_node.destroy_publisher(cls.safety)
+        self.until(lambda: self.node.count_publishers(topic) == 0)
+        self.response(self.execute(Q.ARM, expect_command=False), E.REJECTED)
+        cls.safety = cls.safety_node.create_publisher(CommandContext, topic, 1)
+        cls.safety_enabled = True
+        self.spin_for(0.15)
+        other = self.node.create_publisher(CommandContext, topic, 1)
+        try:
+            self.until(lambda: self.node.count_publishers(topic) == 2)
+            self.spin_for(0.15)
+            self.response(self.execute(Q.ARM, expect_command=False), E.REJECTED)
+            self.assertEqual(len(self.commands), count)
+        finally:
+            self.node.destroy_publisher(other)
+        self.until(lambda: self.node.count_publishers(topic) == 1)
+        self.spin_for(0.15)
+        future = self.execute(Q.ARM)
+        self.ack(A.VEHICLE_CMD_RESULT_DENIED, command=VehicleCommand.VEHICLE_CMD_COMPONENT_ARM_DISARM)
+        self.response(future, E.REJECTED, ack_result=A.VEHICLE_CMD_RESULT_DENIED)
 
 
 @launch_testing.post_shutdown_test()

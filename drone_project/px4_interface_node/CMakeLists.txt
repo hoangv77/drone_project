@@ -28,6 +28,7 @@ find_package(rosidl_typesupport_cpp REQUIRED)
 # builtin_interfaces/Time last_update_time.
 rosidl_generate_interfaces(${PROJECT_NAME}
   "msg/DroneState.msg"
+  "msg/CommandContext.msg"
   "srv/SetFlightMode.srv"
   "srv/ExecuteCommand.srv"
   DEPENDENCIES builtin_interfaces

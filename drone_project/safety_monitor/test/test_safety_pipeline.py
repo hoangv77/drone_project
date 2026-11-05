@@ -102,7 +102,7 @@ class TestSafetyPipeline(unittest.TestCase):
         if cls.enabled:
             for topic, message in cls.messages.items():
                 if topic not in cls.skipped:
-                    message.timestamp = time.monotonic_ns() // 1000
+                    message.timestamp = time.time_ns() // 1000
                     cls.publishers[topic].publish(message)
         if cls.direct_message is not None:
             cls.direct_pub.publish(cls.direct_message)
