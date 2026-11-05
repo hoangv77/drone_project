@@ -110,7 +110,11 @@ def main():
         start=node.create_client(Trigger,'/drone/mission/start')
         result=call(start,Trigger.Request())
         if not result.success: raise RuntimeError(result.message)
-        until(lambda: data.get('mission') and data['mission'].current_state == M.ARMED_WAITING,15)
+        until(lambda: data.get('mission') and data['mission'].current_state in
+              (M.ARMED_WAITING, M.ABORTED, M.FAULT), 15)
+        if data['mission'].current_state != M.ARMED_WAITING:
+            outcome = data['mission'].state_name.lower()
+            raise RuntimeError('Mission terminated before release: ' + data['mission'].transition_reason)
         if args.scenario == 'operator_abort':
             call(node.create_client(Trigger,'/drone/mission/abort'),Trigger.Request())
         elif case.get('release',True):

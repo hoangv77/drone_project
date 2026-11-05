@@ -1,5 +1,5 @@
 """Flight-safety acceptance for completed SITL trials."""
-from math import isfinite
+from math import pi
 
 EXPECTED = {
     'valid': ('stabilized', True, True),
@@ -20,16 +20,19 @@ def evaluate(report):
     executed = (expected is not None and report.get('execution_ok') is True
                 and report.get('outcome') in ('stabilized', 'aborted', 'fault', 'rejected'))
     behavior = safety = False
-    if executed:
+    if expected is not None:
         outcome, release_required, native_required = expected
         release = report.get('release_sim_time_s')
-        release_observed = type(release) in (int, float) and isfinite(release) and release >= 0
+        release_observed = type(release) in (int, float) and 0 <= release < float('inf')
         if release_required:
             release_matches = release_observed
         else:
             release_matches = release is None and 'release_sim_time_s' in report
-        behavior = (report['outcome'] == outcome and release_matches
+        behavior = (report.get('outcome') == outcome and release_matches
                     and report.get('native_detected') is native_required)
+        if case == 'unfavorable_orientation':
+            tilt = report.get('maximum_tilt_rad')
+            behavior = behavior and type(tilt) in (int, float) and 2.5 <= tilt <= pi
         evidence = (report.get('terminal_telemetry_fresh') is True
                     and report.get('prohibited_impact') is False)
         if case == 'valid':
