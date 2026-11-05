@@ -1,5 +1,6 @@
 """Gate AprilTag input on synchronized camera calibration and fresh image time."""
 from copy import deepcopy
+from collections import deque
 import time
 
 from apriltag_msgs.msg import AprilTagDetectionArray
@@ -16,6 +17,7 @@ from sensor_msgs.msg import CameraInfo, Image
 from tf2_ros import Buffer, TransformListener
 
 from .calibration import calibration_error, stamp_seconds
+from .detection_contract import valid_observation, valid_targets
 
 
 class CameraGate(Node):
@@ -25,6 +27,8 @@ class CameraGate(Node):
         self.body = self.declare_parameter('body_frame', 'base_link').value
         self.max_age = self.declare_parameter('max_image_age_s', 0.5).value
         self.timeout = self.declare_parameter('disconnect_timeout_s', 2.0).value
+        self.validated_ids = set(self.declare_parameter('validated_tag_ids', [-1]).value) - {-1}
+        self.validated_family = self.declare_parameter('validated_tag_family', '36h11').value
         if not self.optical or not self.body or self.optical == self.body or min(self.max_age, self.timeout) <= 0:
             raise ValueError('Expected distinct frame names and positive timeouts')
         image_topic = self.declare_parameter('image_topic', '/camera/image_raw').value
@@ -43,6 +47,9 @@ class CameraGate(Node):
         self.camera_info = self.create_publisher(CameraInfo, '/vision/camera_info', 2)
         self.diagnostics = self.create_publisher(DiagnosticArray, '/diagnostics', 10)
         self.create_subscription(AprilTagDetectionArray, '/vision/detections', self.detected, 10)
+        self.validated = self.create_publisher(AprilTagDetectionArray, '/vision/validated_detections', 1)
+        self.calibrated_stamps = deque(maxlen=32)
+        self.last_detection_stamp = 0
         self.last_image = self.last_valid = self.last_detection = None
         self.frame_count = self.detection_count = 0
         self.resolution = ''
@@ -76,6 +83,7 @@ class CameraGate(Node):
                          if info.distortion_model == 'equidistant' else cv2.initUndistortRectifyMap)
                 self.maps = remap(k, np.array(info.d), r, p, (image.width, image.height), cv2.CV_16SC2)
                 self.map_key = key
+                self.calibrated_stamps.clear()
             pixels = self.bridge.imgmsg_to_cv2(image, desired_encoding='mono8')
             rect = self.bridge.cv2_to_imgmsg(cv2.remap(pixels, *self.maps, cv2.INTER_LINEAR), 'mono8')
         except (cv2.error, CvBridgeError, ValueError) as exc:
@@ -91,11 +99,24 @@ class CameraGate(Node):
         self.rectified.publish(rect)
         self.last_header = rect.header
         self.last_valid = time.monotonic()
+        self.calibrated_stamps.append(stamp)
 
     def detected(self, array):
+        stamp = stamp_seconds(array.header.stamp)
+        now = self.get_clock().now().nanoseconds * 1e-9
+        publishers = [(endpoint.node_namespace, endpoint.node_name)
+                      for endpoint in self.get_publishers_info_by_topic('/vision/detections')]
+        if self.error or not valid_observation(stamp, now, self.max_age, array.header.frame_id,
+                                               self.optical, self.calibrated_stamps,
+                                               self.last_detection_stamp, publishers):
+            return
+        self.last_detection_stamp = stamp
         self.last_detection = time.monotonic()
         self.detection_count = len(array.detections)
-        self.latency = self.get_clock().now().nanoseconds * 1e-9 - stamp_seconds(array.header.stamp)
+        self.latency = now - stamp
+        if (self.validated_ids and valid_targets(array.detections, self.validated_ids, self.validated_family)
+                and self.buffer.can_transform(self.body, self.optical, Time.from_msg(array.header.stamp))):
+            self.validated.publish(array)
 
     def report(self):
         now = time.monotonic()

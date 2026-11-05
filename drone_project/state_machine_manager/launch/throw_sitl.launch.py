@@ -13,7 +13,8 @@ def generate_launch_description():
     return LaunchDescription([
         DeclareLaunchArgument('px4_bin'),
         DeclareLaunchArgument('observer_script'),
-        IncludeLaunchDescription(PythonLaunchDescriptionSource(str(safety/'launch/safety.launch.py'))),
+        IncludeLaunchDescription(PythonLaunchDescriptionSource(str(safety/'launch/safety.launch.py')),
+                                 launch_arguments={'sitl_commands': 'true'}.items()),
         Node(package='state_machine_manager', executable='throw_launch_manager', output='screen'),
         ExecuteProcess(cmd=['python3', LaunchConfiguration('observer_script'),
                             '--px4-bin', LaunchConfiguration('px4_bin')], output='screen'),

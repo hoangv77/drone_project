@@ -87,6 +87,37 @@ class IntegrationTest(unittest.TestCase):
                         self.until(lambda: diagnostic('Body-to-optical transform unavailable'))
                 self.until(lambda: diagnostic('Camera stream unavailable'))
 
+    def test_validated_stream_requires_measurement_time_transform(self):
+        from ament_index_python.packages import get_package_share_directory
+        from apriltag_msgs.msg import AprilTagDetectionArray
+        from geometry_msgs.msg import TransformStamped
+        from tf2_ros import StaticTransformBroadcaster
+        import yaml
+
+        raw, validated = [], []
+        self.node.create_subscription(AprilTagDetectionArray, '/vision/detections', raw.append, 10)
+        self.node.create_subscription(AprilTagDetectionArray, '/vision/validated_detections', validated.append, 10)
+        share = Path(get_package_share_directory('drone_vision'))
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / 'camera.yaml'
+            config = yaml.safe_load((share / 'config/camera.yaml').read_text())
+            config['camera_gate']['ros__parameters']['validated_tag_ids'] = [0, 1]
+            path.write_text(yaml.safe_dump(config))
+            with process(['ros2', 'launch', 'drone_vision', 'vision.launch.py',
+                          f'camera_config:={path}', f'tag_config:={share / "config/apriltag.yaml"}']), \
+                    process([self.camera]):
+                self.until(lambda: len(raw) >= 3)
+                self.assertFalse(validated)
+                broadcaster = StaticTransformBroadcaster(self.node)
+                transform = TransformStamped()
+                transform.header.stamp = self.node.get_clock().now().to_msg()
+                transform.header.frame_id = 'base_link'
+                transform.child_frame_id = 'camera_optical_frame'
+                transform.transform.rotation.w = 1.0
+                broadcaster.sendTransform(transform)
+                self.until(lambda: bool(validated))
+                self.assertEqual({tag.id for tag in validated[-1].detections}, {0, 1})
+
     def test_bag_video_stop_and_playback(self):
         from ament_index_python.packages import get_package_share_directory
         from sensor_msgs.msg import CameraInfo

@@ -1,0 +1,51 @@
+{
+  "audit_revision": "0ca5b89ef28971f53098d861a71ba7523d065a0b",
+  "note": "Historical replay. Terminal freshness is unavailable in the compact metrics.",
+  "trials": [
+    {
+      "scenario": "below_threshold",
+      "trial": 1,
+      "historical_returncode": 0,
+      "final_armed": true,
+      "final_landed": true,
+      "outcome": "fault",
+      "verdict": {
+        "executed": true,
+        "behavior_passed": false,
+        "safety_passed": false,
+        "passed": false,
+        "reason": "Terminal safety not verified"
+      }
+    },
+    {
+      "scenario": "unfavorable_orientation",
+      "trial": 2,
+      "historical_returncode": 0,
+      "final_armed": true,
+      "final_landed": false,
+      "outcome": "fault",
+      "verdict": {
+        "executed": true,
+        "behavior_passed": false,
+        "safety_passed": false,
+        "passed": false,
+        "reason": "Terminal safety not verified"
+      }
+    },
+    {
+      "scenario": "unfavorable_orientation",
+      "trial": 3,
+      "historical_returncode": 0,
+      "final_armed": true,
+      "final_landed": false,
+      "outcome": "fault",
+      "verdict": {
+        "executed": true,
+        "behavior_passed": false,
+        "safety_passed": false,
+        "passed": false,
+        "reason": "Terminal safety not verified"
+      }
+    }
+  ]
+}

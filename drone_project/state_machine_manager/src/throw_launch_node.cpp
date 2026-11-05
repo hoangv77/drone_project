@@ -1,9 +1,11 @@
 #include <state_machine_manager/mission_machine.hpp>
 #include <state_machine_manager/msg/native_launch_status.hpp>
 #include <px4_interface_node/srv/execute_command.hpp>
+#include <px4_interface_node/msg/command_context.hpp>
 #include <px4_msgs/msg/vehicle_attitude.hpp>
 #include <rclcpp/rclcpp.hpp>
 #include <std_srvs/srv/trigger.hpp>
+#include "input_lease.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -34,10 +36,14 @@ public:
     config.stabilize_timeout = sm::Milliseconds(15000);
     machine_ = std::make_unique<sm::MissionMachine>(config);
     state_pub_ = create_publisher<sm::Mission>("/drone/mission_state", 1);
+    command_context_ = create_publisher<px4_interface_node::msg::CommandContext>(
+      "/drone/command_mission", 1);
     client_ = create_client<Command>("/drone/execute_command");
     drone_sub_ = create_subscription<sm::Drone>("/drone/state", rclcpp::QoS(1).best_effort(),
-      [this](sm::Drone::SharedPtr d) {
-        drone_ = *d; drone_rx_ = sm::Clock::now(); machine_->receive_drone(*d, drone_rx_);
+      [this, limit = config.telemetry_timeout](sm::Drone::SharedPtr d, const rclcpp::MessageInfo & info) {
+        const auto at = drone_lease_.observe(*this, drone_sub_->get_topic_name(), d->last_update_time, info, limit);
+        if (!at) {return;}
+        drone_ = *d; drone_rx_ = *at; machine_->receive_drone(*d, drone_rx_);
         if (awaiting_command_state_ && d->status_fresh && !d->command_pending &&
           d->armed == expected_armed_ && d->flight_mode == expected_mode_)
         {
@@ -46,7 +52,11 @@ public:
         }
       });
     safety_sub_ = create_subscription<sm::Safety>("/drone/safety_status", 1,
-      [this](sm::Safety::SharedPtr s) {machine_->receive_safety(*s, sm::Clock::now());});
+      [this, limit = config.safety_timeout](sm::Safety::SharedPtr s, const rclcpp::MessageInfo & info) {
+        if (auto at = safety_lease_.observe(*this, safety_sub_->get_topic_name(), s->timestamp, info, limit)) {
+          machine_->receive_safety(*s, *at);
+        }
+      });
     native_sub_ = create_subscription<Native>("/simulation/native_launch_status", 1,
       [this](Native::SharedPtr n) {
         if (n->px4_timestamp <= native_.px4_timestamp) {return;}
@@ -80,7 +90,7 @@ public:
         if (result.accepted) {
           active_ = true; saw_lockdown_ = false; unlocked_ = false; command_step_ = 0;
           recovery_attempts_ = 0; stable_since_.reset();
-          issue(Command::Request::RUN_PREFLIGHT_CHECKS);
+          preflight_dispatch_after_ = t + sm::Milliseconds(100);
         }
       });
     abort_ = create_service<Trigger>("/drone/mission/abort",
@@ -99,6 +109,17 @@ public:
   }
 
 private:
+  void publish_command_context(uint8_t state)
+  {
+    using Context = px4_interface_node::msg::CommandContext;
+    Context context;
+    context.stamp = rclcpp::Clock(RCL_SYSTEM_TIME).now();
+    context.phase = state == sm::Mission::STANDBY ? Context::IDLE :
+      state == sm::Mission::PREFLIGHT ? Context::PREFLIGHT :
+      state == sm::Mission::RECOVERY ? Context::RECOVERY : Context::OTHER;
+    command_context_->publish(context);
+  }
+
   bool native_fresh(sm::Time t) const
   {return native_.px4_timestamp != 0 && t >= native_rx_ && t - native_rx_ < sm::Milliseconds(1200);}
 
@@ -155,6 +176,7 @@ private:
     // Evaluate the newest safety/status inputs before any command side effect.
     machine_->tick(t);
     auto state = machine_->snapshot(t);
+    publish_command_context(state.current_state);
     if (state.current_state == sm::Mission::RECOVERY || state.current_state == sm::Mission::ABORTED ||
       state.current_state == sm::Mission::FAULT || state.current_state == sm::Mission::STANDBY)
     {active_ = false;}
@@ -168,7 +190,10 @@ private:
       native_.armed && native_.lockdown)
     {machine_->confirm_launch_arming();}
     if (active_ && state.current_state == sm::Mission::PREFLIGHT && !pending_ && !awaiting_command_state_) {
-      if (command_step_ == 1) {issue(Command::Request::SET_MODE, "LOITER");}
+      if (command_step_ == 0 && t >= preflight_dispatch_after_) {
+        issue(Command::Request::RUN_PREFLIGHT_CHECKS);
+      }
+      else if (command_step_ == 1) {issue(Command::Request::SET_MODE, "LOITER");}
       else if (command_step_ == 2) {issue(Command::Request::ARM);}
     }
     // A lockdown->unlocked transition while armed is PX4's native detection
@@ -218,9 +243,11 @@ private:
   }
 
   std::unique_ptr<sm::MissionMachine> machine_;
+  sm::InputLease drone_lease_, safety_lease_;
   sm::Drone drone_;
   Native native_;
   sm::Time drone_rx_{}, native_rx_{}, attitude_rx_{}, command_started_{}, published_{}, recovery_last_{};
+  sm::Time preflight_dispatch_after_{};
   std::optional<sm::Time> stable_since_;
   double tilt_{INFINITY};
   uint64_t attitude_timestamp_{0}, observation_{0}, last_transition_{0};
@@ -229,6 +256,7 @@ private:
   std::string expected_mode_;
   int command_step_{0}, recovery_attempts_{0};
   rclcpp::Publisher<sm::Mission>::SharedPtr state_pub_;
+  rclcpp::Publisher<px4_interface_node::msg::CommandContext>::SharedPtr command_context_;
   rclcpp::Subscription<sm::Drone>::SharedPtr drone_sub_;
   rclcpp::Subscription<sm::Safety>::SharedPtr safety_sub_;
   rclcpp::Subscription<Native>::SharedPtr native_sub_;

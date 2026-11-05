@@ -16,6 +16,7 @@ from px4_msgs.msg import VehicleAttitude
 from safety_monitor.msg import SafetyStatus
 from state_machine_manager.msg import MissionState as M, NativeLaunchStatus
 from std_srvs.srv import Trigger
+from verdict import evaluate
 
 
 def main():
@@ -32,11 +33,16 @@ def main():
     drone_sequence = 0
     native_detection = None; stabilized_at = None; release_sim_t = None; ground_stable_at = None
     truth_records = []
+    drone_rx = None
+    trajectory_verified = False
     gz_node = GzNode()
     def truth(message):
         for pose in message.pose:
             if pose.name == 'drone_phase6_0':
                 q=pose.orientation
+                if not all(math.isfinite(value) for value in
+                           (q.w, q.x, q.y, q.z, pose.position.x, pose.position.y, pose.position.z)):
+                    continue
                 truth_records.append({'t':time.monotonic()-started,
                     'sim_t':message.header.stamp.sec+message.header.stamp.nsec*1e-9,
                     'x':pose.position.x,'y':pose.position.y,'z':pose.position.z,
@@ -58,12 +64,14 @@ def main():
             if speed>=0.7 or after['tilt_rad']>=0.17 or after['z']<=0.1: return False
         return True
     def record(key, message):
-        nonlocal native_detection, stabilized_at, drone_sequence
+        nonlocal native_detection, stabilized_at, drone_sequence, drone_rx
         data[key] = message
         t = time.monotonic()
         if key == 'drone':
+            drone_rx = t
             drone_sequence += 1
-            records.append({'t':t-started,'z_ned':message.z,'landed':message.landed,'armed':message.armed})
+            records.append({'t':t-started,'z_ned':message.z if math.isfinite(message.z) else None,
+                            'landed':message.landed,'armed':message.armed})
         if key == 'native' and release_at is not None and message.armed and not message.lockdown and native_detection is None:
             native_detection = t
         if key == 'mission':
@@ -88,9 +96,12 @@ def main():
         if not client.wait_for_service(timeout_sec=10): raise TimeoutError('Service unavailable')
         future=client.call_async(request); until(future.done,10); return future.result()
     outcome = 'error'; detail = ''
+    execution_ok = False
     try:
         command=node.create_client(ExecuteCommand,'/drone/execute_command')
-        until(lambda:'drone' in data and data['drone'].status_fresh,90)
+        until(lambda: 'drone' in data and data['drone'].status_fresh
+              and data['drone'].pre_flight_checks_pass and 'safety' in data
+              and data['safety'].telemetry_healthy and 'mission' in data, 90)
         if data['drone'].flight_mode != 'LOITER':
             request=ExecuteCommand.Request(); request.command=request.SET_MODE; request.mode='LOITER'
             result=call(command,request)
@@ -102,7 +113,11 @@ def main():
         start=node.create_client(Trigger,'/drone/mission/start')
         result=call(start,Trigger.Request())
         if not result.success: raise RuntimeError(result.message)
-        until(lambda: data.get('mission') and data['mission'].current_state == M.ARMED_WAITING,15)
+        until(lambda: data.get('mission') and data['mission'].current_state in
+              (M.ARMED_WAITING, M.ABORTED, M.FAULT), 15)
+        if data['mission'].current_state != M.ARMED_WAITING:
+            outcome = data['mission'].state_name.lower()
+            raise RuntimeError('Mission terminated before release: ' + data['mission'].transition_reason)
         if args.scenario == 'operator_abort':
             call(node.create_client(Trigger,'/drone/mission/abort'),Trigger.Request())
         elif case.get('release',True):
@@ -123,18 +138,34 @@ def main():
                 raise RuntimeError('Ground truth did not show the expected upward throw trajectory')
             if args.scenario=='valid' and min(s['z'] for s in post)<0.05:
                 raise RuntimeError('Ground contact before stabilization invalidates a successful throw')
+            trajectory_verified = bool(pre and post and max(s['z'] for s in post) >= pre[-1]['z']+0.5)
+        terminal_sequence = drone_sequence
+        until(lambda: drone_sequence > terminal_sequence and data['drone'].status_fresh
+              and data['drone'].land_detected_fresh, 3)
+        execution_ok = True
     except Exception as error:
-        outcome='error'; detail=str(error)
+        detail=str(error)
     finally:
         release_t=None if release_at is None else release_at-started
-        heights=[-r['z_ned'] for r in records if 'z_ned' in r and release_t is not None and r['t']>=release_t]
-        release_samples=[-r['z_ned'] for r in records if 'z_ned' in r and release_t is not None and r['t']<=release_t]
+        heights=[-r['z_ned'] for r in records if r.get('z_ned') is not None and release_t is not None and r['t']>=release_t]
+        release_samples=[-r['z_ned'] for r in records if r.get('z_ned') is not None and release_t is not None and r['t']<=release_t]
         initial=release_samples[-1] if release_samples else None
-        truth_after=[s for s in list(truth_records) if release_t is not None and s['t']>=release_t]
+        truth_after=[s for s in list(truth_records) if release_sim_t is not None and s['sim_t']>=release_sim_t]
+        impact_samples = truth_after if release_sim_t is not None else list(truth_records)
+        impact = None
+        if impact_samples and time.monotonic() - started - impact_samples[-1]['t'] < 0.5:
+            impact = any(s['z'] < 0.05 for s in impact_samples)
         truth_before=[s for s in list(truth_records) if release_t is not None and s['t']<=release_t]
         true_initial=None if not truth_before else truth_before[-1]['z']
         report={'scenario':args.scenario,'outcome':outcome,'detail':detail,
+            'execution_ok':execution_ok,
+            'terminal_telemetry_fresh':bool(drone_rx is not None and time.monotonic()-drone_rx < 0.5
+                and data['drone'].status_fresh and data['drone'].land_detected_fresh),
             'final_armed':None if 'drone' not in data else data['drone'].armed,
+            'final_landed':None if 'drone' not in data else data['drone'].landed,
+            'final_mode':None if 'drone' not in data else data['drone'].flight_mode,
+            'trajectory_verified':trajectory_verified,
+            'prohibited_impact':impact,
             'ground_truth_stable':truth_stable(),
             'ground_truth_peak_altitude_m':max([s['z'] for s in truth_after],default=None),
             'release_sim_time_s':release_sim_t,
@@ -147,16 +178,14 @@ def main():
             'maximum_tilt_rad':max([s['tilt_rad'] for s in truth_after],default=None),
             'records':records,'ground_truth_records':list(truth_records),
             'limitations':'Detection timing uses ROS receipt time; altitude/tilt use independent Gazebo pose; model propulsion/mass provisional'}
+        report['verdict'] = evaluate(report)
         args.output.parent.mkdir(parents=True,exist_ok=True)
         args.output.write_text(json.dumps(report,indent=2)+'\n')
         print(json.dumps({k:v for k,v in report.items() if k not in ['records','ground_truth_records']},indent=2))
         gz_node.unsubscribe('/world/throw_world/pose/info')
         gz_node.unsubscribe('/phase6/released')
         node.destroy_node();rclpy.shutdown()
-    expected = (outcome=='stabilized' if args.scenario=='valid' else
-                outcome=='aborted' and report['final_armed'] is False if args.scenario in ['operator_abort','launch_timeout'] else
-                release_at is not None and outcome!='error' and not report['native_detected'] if args.scenario=='below_threshold' else outcome!='error')
-    raise SystemExit(0 if expected else 1)
+    raise SystemExit(0 if report['verdict']['passed'] else 1)
 
 
 if __name__=='__main__': main()

@@ -2,6 +2,7 @@
 #include <rcl_interfaces/msg/parameter_descriptor.hpp>
 #include <std_srvs/srv/trigger.hpp>
 #include <state_machine_manager/mission_machine.hpp>
+#include "input_lease.hpp"
 
 #include <functional>
 #include <memory>
@@ -54,6 +55,7 @@ public:
     config.recovery_timeout = duration("recovery_timeout_ms", config.recovery_timeout);
     config.enable_stage_feedback =
       declare_parameter("enable_stage_feedback", false, fixed) && !monitor_only_;
+    const auto feedback_authority = declare_parameter<std::string>("stage_feedback_authority", "", fixed);
     config.allow_flight_warnings = declare_parameter("allow_flight_warnings", false, fixed);
     std::random_device random;
     const uint64_t seed = (static_cast<uint64_t>(random()) << 32) ^ random();
@@ -62,14 +64,27 @@ public:
       rclcpp::QoS(1).reliable().durability_volatile());
     drone_sub_ = create_subscription<sm::Drone>("/drone/state",
       rclcpp::QoS(1).best_effort().durability_volatile(),
-      [this](sm::Drone::SharedPtr data) {machine_->receive_drone(*data, sm::Clock::now());});
+      [this, limit = config.telemetry_timeout](sm::Drone::SharedPtr data, const rclcpp::MessageInfo & info) {
+        if (auto at = drone_lease_.observe(*this, drone_sub_->get_topic_name(), data->last_update_time, info, limit)) {
+          machine_->receive_drone(*data, *at);
+        }
+      });
     safety_sub_ = create_subscription<sm::Safety>("/drone/safety_status",
       rclcpp::QoS(1).reliable().durability_volatile(),
-      [this](sm::Safety::SharedPtr data) {machine_->receive_safety(*data, sm::Clock::now());});
+      [this, limit = config.safety_timeout](sm::Safety::SharedPtr data, const rclcpp::MessageInfo & info) {
+        if (auto at = safety_lease_.observe(*this, safety_sub_->get_topic_name(), data->timestamp, info, limit)) {
+          machine_->receive_safety(*data, *at);
+        }
+      });
     feedback_sub_ = create_subscription<sm::Feedback>("/drone/mission/stage_feedback",
       rclcpp::QoS(1).reliable().durability_volatile(),
-      [this](sm::Feedback::SharedPtr data) {
-        const auto result = machine_->receive_feedback(*data, sm::Clock::now());
+      [this, feedback_authority, limit = config.feedback_timeout](
+        sm::Feedback::SharedPtr data, const rclcpp::MessageInfo & info) {
+        if (feedback_authority.empty()) {return;}
+        auto at = feedback_lease_.observe(*this, feedback_sub_->get_topic_name(),
+            data->timestamp, info, limit, feedback_authority);
+        if (!at) {return;}
+        const auto result = machine_->receive_feedback(*data, *at);
         if (!result.accepted) {RCLCPP_DEBUG(get_logger(), "Feedback rejected: %s", result.reason.c_str());}
       });
     start_service_ = control_service("/drone/mission/start", &sm::MissionMachine::start);
@@ -125,6 +140,7 @@ private:
   }
   std::unique_ptr<sm::MissionMachine> machine_;
   bool monitor_only_;
+  sm::InputLease drone_lease_, safety_lease_, feedback_lease_;
   uint64_t last_logged_{0};
   rclcpp::Publisher<sm::Mission>::SharedPtr publisher_;
   rclcpp::Subscription<sm::Drone>::SharedPtr drone_sub_;

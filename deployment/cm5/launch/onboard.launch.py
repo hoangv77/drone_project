@@ -21,7 +21,8 @@ def generate_launch_description():
         Node(package='px4_interface_node', executable='px4_interface_node', output='screen',
              parameters=[{'read_only': True, 'use_sim_time': False}]),
         Node(package='safety_monitor', executable='safety_monitor', output='screen',
-             parameters=[LaunchConfiguration('safety_config'), {'use_sim_time': False}]),
+             parameters=[LaunchConfiguration('safety_config'),
+                         {'use_sim_time': False, 'publish_command_safety': False}]),
         Node(package='state_machine_manager', executable='state_machine_manager', output='screen',
              parameters=[LaunchConfiguration('mission_config'), {
                  'monitor_only': True, 'enable_stage_feedback': False, 'use_sim_time': False,
@@ -42,6 +43,8 @@ def generate_launch_description():
                            for topic, _ in probe.get_topic_names_and_types())
             return ('throw_launch_manager' in managers or len(managers) > int(not starting)
                     or probe.count_publishers('/drone/mission_state') > int(not starting)
+                    or probe.count_publishers('/drone/state') > int(not starting)
+                    or probe.count_publishers('/drone/safety_status') > int(not starting)
                     or outbound)
 
         def close(_):

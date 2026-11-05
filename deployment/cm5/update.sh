@@ -3,7 +3,7 @@ set -euo pipefail
 here=$(cd "$(dirname "$0")" && pwd)
 . "$here/lib.sh"
 require_platform
-need git sudo flock systemctl
+need git sudo flock systemctl python3
 state=/opt/drone/state
 [[ -w $state ]] || die "Run install.sh as this operator first."
 umask 022
@@ -55,13 +55,12 @@ flock -n 9 || die "Another install, build or update is running."
 scripts=$candidate/source/deployment/cm5
 bash "$scripts/verify.sh" build "$candidate"
 commit=$(cat "$candidate/commit")
-old=$(readlink "$state/current" || true)
-if [[ $old == "$candidate" ]]; then
-    log "already active commit=$commit release=$candidate"
-    exit 0
-fi
-
-# Capture running/starting services. Enablement is managed separately by the operator.
+activation=/opt/drone/recovery/activation.py
+[[ -f $activation ]] || die "Install the Phase 8.5 recovery helper and service units first."
+for unit in drone-agent drone-stack; do
+    [[ $(systemctl show -p ExecStartPre --value "$unit") == *"$activation boot"* ]] ||
+        die "Install and reload the Phase 8.5 unit for $unit before activation."
+done
 running=()
 for unit in drone-agent drone-stack; do
     case $(systemctl show -p ActiveState --value "$unit") in
@@ -69,53 +68,48 @@ for unit in drone-agent drone-stack; do
     esac
 done
 
-point_current() {
-    local staging
-    staging=$(mktemp -d "$state/.activate.XXXXXXXX")
-    ln -s -- "$1" "$staging/current"
-    mv -Tf -- "$staging/current" "$state/current"
-    rmdir "$staging"
+manage() {
+    # Children must not keep the updater lock alive after updater termination.
+    sudo systemctl "$@" 8>&- 9>&-
 }
-stop_running() {
+journal() {
+    python3 -I "$activation" "$@" 8>&- 9>&-
+}
+restore_running() {
     if (( ${#running[@]} )); then
-        # Starting the stack can pull in the Agent via Wants=.
-        sudo systemctl stop drone-stack drone-agent
+        manage start "${running[@]}"
     fi
 }
-start_running() {
-    if (( ${#running[@]} )); then
-        sudo systemctl start "${running[@]}"
-    fi
-}
-
 rollback() {
     local code=$?
     trap - EXIT HUP INT TERM
     if (( code == 0 )); then return; fi
-    log "activation failed commit=$commit; restoring release=${old:-none}"
-    stop_running || log "rollback: stopping candidate services failed"
-    if [[ -n $old ]]; then
-        point_current "$old" || die "Rollback could not restore $state/current."
-        start_running || die "Rollback restored the pointer but failed to restart previous services."
+    manage stop drone-stack drone-agent || true
+    if journal rollback; then
+        restore_running || log "previous release needs operator restart"
+        log "rollback completed"
     else
-        rm -f -- "$state/current"
+        log "rollback incomplete. Services require operator intervention."
     fi
-    log "rollback completed"
     exit "$code"
 }
+
+journal prepare "$candidate"
 trap rollback EXIT
 trap 'exit 129' HUP
 trap 'exit 130' INT
 trap 'exit 143' TERM
-log "activating commit=$commit release=$candidate previous=${old:-none}"
-stop_running
-point_current "$candidate"
-start_running
-if [[ " ${running[*]} " == *' drone-stack '* ]]; then
-    bash "$scripts/verify.sh" passive "$candidate"
-fi
-if [[ " ${running[*]} " == *' drone-agent '* ]]; then
-    systemctl is-active --quiet drone-agent
-fi
-log "active commit=$commit release=$candidate previous=${old:-none}"
+log "activating commit=$commit release=$candidate"
+manage stop drone-stack drone-agent
+journal switch
+manage start drone-stack
+bash "$scripts/verify.sh" passive "$candidate" 8>&- 9>&-
+for unit in drone-stack drone-agent; do
+    systemctl is-active --quiet "$unit" 8>&- 9>&-
+done
+journal commit
 trap - EXIT HUP INT TERM
+for unit in drone-stack drone-agent; do
+    if [[ " ${running[*]} " != *" $unit "* ]]; then manage stop "$unit"; fi
+done
+log "active commit=$commit release=$candidate"
