@@ -40,6 +40,8 @@ sudo test -d /opt/drone/releases ||
 # The operator can publish a symlink and append deployment records here.
 sudo test -d /opt/drone/state ||
     sudo install -d -m 0755 -o "$(id -un)" /opt/drone/state
+sudo install -d -m 0755 /opt/drone/recovery
+sudo install -m 0644 "$here/activation.py" /opt/drone/recovery/activation.py
 install_default "$here/config/drone.env.example" /etc/drone/drone.env
 install_default "$here/config/fastdds.xml" /etc/drone/fastdds.xml
 for unit in drone-agent.service drone-stack.service; do

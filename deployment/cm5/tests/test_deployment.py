@@ -150,6 +150,15 @@ class LinuxShellTests(unittest.TestCase):
         old.mkdir()
         current = self.opt / 'state/current'
         current.symlink_to(old, target_is_directory=True)
+        (old / 'verified').touch()
+        recovery = self.opt / 'recovery'
+        recovery.mkdir()
+        (recovery / 'activation.py').write_text(
+            (CM5 / 'activation.py').read_text().replace('/opt/drone', str(self.opt)))
+        import json
+        (self.opt / 'state/activation.json').write_text(json.dumps(
+            dict(phase='verified', previous=None, candidate=str(old))))
+
         candidate = self.opt / 'releases/candidate'
         scripts = candidate / 'source/deployment/cm5'
         scripts.mkdir(parents=True)
@@ -157,13 +166,14 @@ class LinuxShellTests(unittest.TestCase):
         (candidate / 'commit').write_text('candidate\n')
         (scripts / 'verify.sh').write_text('[[ "$1" == build ]]\n')
         self.stub('systemctl', 'echo "$* $(readlink "' + str(current) + '")" >> "$TEST_LOG"\n'
-                               'if [[ $1 == show ]]; then echo active; fi')
+                               'if [[ $* == *ExecStartPre* ]]; then echo "' + str(recovery / 'activation.py') +
+                               ' boot"; elif [[ $1 == show ]]; then echo active; fi')
         result = self.shell('update.sh', '--activate', str(candidate))
         self.assertNotEqual(result.returncode, 0)
         self.assertEqual(current.resolve(), old)
         self.assertIn('rollback completed', result.stdout)
         calls = (self.work / 'calls').read_text()
-        self.assertIn(f'start drone-agent drone-stack {candidate}', calls)
+        self.assertIn(f'start drone-stack {candidate}', calls)
         self.assertIn(f'start drone-agent drone-stack {old}', calls)
 
 
