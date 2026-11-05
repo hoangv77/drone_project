@@ -222,7 +222,10 @@ class TestSafetyPipeline(unittest.TestCase):
         self.assertFalse(self.states[-1].failsafe_flags_fresh)
         self.prepare()
         type(self).skipped = {'/fmu/out/vehicle_land_detected'}
-        self.assertFalse(self.wait_level(S.BLOCKED).launch_permitted)
+        self.until(lambda: not self.states[-1].land_detected_fresh)
+        self.until(lambda: self.statuses[-1].level == S.BLOCKED and
+                   'land detection missing/stale' in self.statuses[-1].reason)
+        self.assertFalse(self.statuses[-1].launch_permitted)
         self.assertFalse(self.states[-1].land_detected_fresh)
 
     def test_06_manual_takeover_and_visual_mode(self):

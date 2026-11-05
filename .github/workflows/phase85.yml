@@ -1,0 +1,63 @@
+name: Phase 8.5 regression
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  fast:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - run: sudo apt-get update && sudo apt-get install -y python3-yaml
+      - name: Syntax and deterministic regressions
+        run: |
+          git diff --check HEAD
+          python3 -m compileall -q deployment/cm5 drone_project
+          for file in deployment/cm5/*.sh drone_project/simulation/tools/*.sh; do bash -n "$file"; done
+          python3 -m unittest discover -s drone_project/simulation/test -v
+          python3 -m unittest discover -s deployment/cm5/tests -v
+          PYTHONPATH=drone_project/vision python3 -m unittest discover -s drone_project/vision/test -v
+
+  extended:
+    if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main'
+    runs-on: [self-hosted, linux, x64, px4-sitl]
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build, test and run isolated flight-safety scenarios
+        shell: bash
+        run: |
+          set -eo pipefail
+          : "${PX4_ROOT:?Preprovision the pinned PX4 simulator}"
+          : "${MICRO_XRCE_AGENT:?Preprovision the pinned DDS agent}"
+          repo=$PWD
+          report=$RUNNER_TEMP/phase85-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}
+          mkdir -p "$report"
+          source /opt/ros/humble/setup.bash
+          export ROS_LOCALHOST_ONLY=1 ROS_DOMAIN_ID=84 GZ_PARTITION=phase85-ci
+          python3 deployment/cm5/schema.py prepare "$report" "$PX4_ROOT" 97a3c7f01793e2b0b9e5a30425b8e88e69741f27
+          cd "$report"
+          paths=("$report/px4_msgs" "$repo/drone_project/px4_interface_node" "$repo/drone_project/safety_monitor"
+                 "$repo/drone_project/state_machine_manager" "$repo/drone_project/vision")
+          colcon build --merge-install --base-paths "${paths[@]}"
+          colcon test --merge-install --base-paths "${paths[@]}" --packages-select px4_interface_node safety_monitor state_machine_manager
+          colcon test-result --verbose
+          source install/local_setup.bash
+          cd "$repo"
+          CM5_TEST_ROS=1 python3 -m unittest discover -s deployment/cm5/tests -v
+          PYTHONNOUSERSITE=1 PHASE8_TEST_ROS=1 python3 -m unittest discover -s drone_project/vision/test -v
+          python3 -m unittest discover -s drone_project/simulation/test -v
+          timeout --signal=INT --kill-after=30s 12m python3 drone_project/simulation/tools/run_suite.py --output "$report/sitl.json"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: phase85-results
+          path: |
+            ${{ runner.temp }}/phase85-*/sitl.json
+            ${{ runner.temp }}/phase85-*/build/**/test_results/**/*.xml

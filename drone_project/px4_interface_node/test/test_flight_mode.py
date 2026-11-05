@@ -211,7 +211,8 @@ class TestFlightMode(unittest.TestCase):
         count = len(self.commands)
         future = self.client.call_async(SetFlightMode.Request(mode=mode))
         if expect_command:
-            self.until(lambda: len(self.commands) > count)
+            self.until(lambda: len(self.commands) > count or future.done())
+            self.assertGreater(len(self.commands), count, future.result().message if future.done() else '')
         return future
 
     def ack(self, result=A.VEHICLE_CMD_RESULT_ACCEPTED, **overrides):
@@ -229,7 +230,8 @@ class TestFlightMode(unittest.TestCase):
         count = len(self.commands)
         future = self.command_client.call_async(Q(command=kind, mode=mode))
         if expect_command:
-            self.until(lambda: len(self.commands) > count)
+            self.until(lambda: len(self.commands) > count or future.done())
+            self.assertGreater(len(self.commands), count, future.result().message if future.done() else '')
         return future
 
     def response(self, future, result, accepted=False, ack_result=R.NO_ACK):

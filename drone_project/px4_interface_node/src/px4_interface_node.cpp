@@ -52,8 +52,10 @@ public:
         if (sitl_commands && !read_only_) {
             const auto * localhost = std::getenv("ROS_LOCALHOST_ONLY");
             const auto * domain = std::getenv("ROS_DOMAIN_ID");
-            if (!localhost || std::string(localhost) != "1" || !domain ||
-                !*domain || std::string(domain) == "0") {
+            char * end = nullptr;
+            const auto domain_id = domain ? std::strtol(domain, &end, 10) : 0;
+            if (!localhost || std::string(localhost) != "1" || !domain || !end ||
+                *end != '\0' || domain_id < 1 || domain_id > 99) {
                 throw std::invalid_argument("SITL commands require a dedicated localhost DDS domain");
             }
         }
@@ -736,7 +738,8 @@ private:
         state.landed = landed_;
         state.land_detected_fresh = is_fresh(has_land_, last_land_rx_, status_timeout_, steady_now) && land_subscription_->get_publisher_count() == 1;
         const auto arm_guard = command_guard(CommandRequest::ARM, nullptr, steady_now);
-        state.ready_to_arm = !armed_ && !pending_command_ && arm_guard.result == CommandResponse::SUCCESS;
+        state.ready_to_arm = status_fresh && state.land_detected_fresh && !armed_ && !pending_command_ &&
+            arm_guard.result == CommandResponse::SUCCESS;
         state.arming_block_reason = armed_ ? "Already armed" :
             (pending_command_ ? "Another command is pending" : arm_guard.message);
         state.command_pending = pending_command_ != nullptr;

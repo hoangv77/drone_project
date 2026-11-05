@@ -40,6 +40,9 @@ def main():
         for pose in message.pose:
             if pose.name == 'drone_phase6_0':
                 q=pose.orientation
+                if not all(math.isfinite(value) for value in
+                           (q.w, q.x, q.y, q.z, pose.position.x, pose.position.y, pose.position.z)):
+                    continue
                 truth_records.append({'t':time.monotonic()-started,
                     'sim_t':message.header.stamp.sec+message.header.stamp.nsec*1e-9,
                     'x':pose.position.x,'y':pose.position.y,'z':pose.position.z,
