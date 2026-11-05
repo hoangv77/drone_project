@@ -1,0 +1,156 @@
+{
+  "fresh_suite": [
+    {
+      "scenario": "valid",
+      "returncode": 1,
+      "outcome": "error",
+      "execution_ok": false,
+      "terminal_telemetry_fresh": false,
+      "final_armed": false,
+      "final_landed": true,
+      "release_sim_time_s": null,
+      "native_detected": false,
+      "verdict": {
+        "executed": false,
+        "behavior_passed": false,
+        "safety_passed": false,
+        "passed": false,
+        "reason": "Execution incomplete"
+      },
+      "command_observation": "PX4 acknowledged prearm checks and subsequently reported failed checks",
+      "mission_transition": [
+        "PREFLIGHT",
+        "RECOVERY",
+        "ABORTED"
+      ]
+    },
+    {
+      "scenario": "unfavorable_orientation",
+      "returncode": 1,
+      "outcome": "error",
+      "execution_ok": false,
+      "terminal_telemetry_fresh": false,
+      "final_armed": false,
+      "final_landed": true,
+      "release_sim_time_s": null,
+      "native_detected": false,
+      "verdict": {
+        "executed": false,
+        "behavior_passed": false,
+        "safety_passed": false,
+        "passed": false,
+        "reason": "Execution incomplete"
+      },
+      "command_observation": "PX4 acknowledged prearm checks and subsequently reported failed checks",
+      "mission_transition": [
+        "PREFLIGHT",
+        "RECOVERY",
+        "ABORTED"
+      ]
+    },
+    {
+      "scenario": "below_threshold",
+      "returncode": 1,
+      "outcome": "error",
+      "execution_ok": false,
+      "terminal_telemetry_fresh": false,
+      "final_armed": false,
+      "final_landed": true,
+      "release_sim_time_s": null,
+      "native_detected": false,
+      "verdict": {
+        "executed": false,
+        "behavior_passed": false,
+        "safety_passed": false,
+        "passed": false,
+        "reason": "Execution incomplete"
+      },
+      "command_observation": "PX4 acknowledged prearm checks and subsequently reported failed checks",
+      "mission_transition": [
+        "PREFLIGHT",
+        "RECOVERY",
+        "ABORTED"
+      ]
+    },
+    {
+      "scenario": "launch_timeout",
+      "returncode": 1,
+      "outcome": "error",
+      "execution_ok": false,
+      "terminal_telemetry_fresh": false,
+      "final_armed": false,
+      "final_landed": true,
+      "release_sim_time_s": null,
+      "native_detected": false,
+      "verdict": {
+        "executed": false,
+        "behavior_passed": false,
+        "safety_passed": false,
+        "passed": false,
+        "reason": "Execution incomplete"
+      },
+      "command_observation": "PX4 acknowledged prearm checks and subsequently reported failed checks",
+      "mission_transition": [
+        "PREFLIGHT",
+        "RECOVERY",
+        "ABORTED"
+      ]
+    },
+    {
+      "scenario": "operator_abort",
+      "returncode": 1,
+      "outcome": "error",
+      "execution_ok": false,
+      "terminal_telemetry_fresh": false,
+      "final_armed": false,
+      "final_landed": true,
+      "release_sim_time_s": null,
+      "native_detected": false,
+      "verdict": {
+        "executed": false,
+        "behavior_passed": false,
+        "safety_passed": false,
+        "passed": false,
+        "reason": "Execution incomplete"
+      },
+      "command_observation": "PX4 acknowledged prearm checks and subsequently reported failed checks",
+      "mission_transition": [
+        "PREFLIGHT",
+        "RECOVERY",
+        "ABORTED"
+      ]
+    }
+  ],
+  "baseline_nominal_comparison": [
+    {
+      "scenario": "valid",
+      "returncode": 0,
+      "outcome": "stabilized",
+      "final_armed": true,
+      "release_sim_time_s": 11.548,
+      "native_detected": true,
+      "detail": "Throw stabilized; PX4 LOITER holds airborne vehicle; no next mission enabled"
+    }
+  ],
+  "hardened_nominal_comparison": [
+    {
+      "scenario": "valid",
+      "returncode": 1,
+      "outcome": "aborted",
+      "execution_ok": false,
+      "terminal_telemetry_fresh": true,
+      "final_armed": false,
+      "final_landed": true,
+      "release_sim_time_s": null,
+      "native_detected": false,
+      "verdict": {
+        "executed": false,
+        "behavior_passed": false,
+        "safety_passed": false,
+        "passed": false,
+        "reason": "Execution incomplete"
+      },
+      "detail": "Mission terminated before release: External recovery confirmed disarmed and landed; reset required"
+    }
+  ]
+}
