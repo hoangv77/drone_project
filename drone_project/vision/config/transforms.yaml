@@ -1,0 +1,6 @@
+# Example structure only. Supply measured mounting translation and quaternion.
+# Use an empty mount argument until calibrated mounting values are available.
+parent: base_link
+child: camera_link
+translation: null
+quaternion_xyzw: null

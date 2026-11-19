@@ -81,8 +81,11 @@ node's startup parameter default, is logged, and is immutable. The legacy node
 ignores a `read_only=false` override and reports the effective value `true`.
 No PX4 input publisher is constructed in that build, even when
 `sitl_commands=true`. Command services remain available but reject all requests.
-Modern `sitl_commands` defaults to true to retain the repository's previous
-command-enabled default; setting it false disables the command publisher.
+Modern `sitl_commands` defaults to false, preserving the base branch's explicit
+SITL opt-in. Enabling it requires `ROS_LOCALHOST_ONLY=1` and a dedicated nonzero
+DDS domain (1–99). The base branch's fresh safety/mission authorization contexts
+and command acknowledgment correlation remain enforced. The legacy profile
+never creates these command endpoints even when the opt-in is supplied.
 
 Topic defaults are centralized in `src/compatibility.hpp.in` and the node's
 startup configuration. ROS remappings or immutable `topics.vehicle_status`,
@@ -111,14 +114,17 @@ diagnostic. The exact legacy VehicleStatus includes all status fields read by
 the node, including `nav_state_user_intention`; active flight mode still comes
 from `nav_state`. Arming and mode constants are validated against the source.
 
-Freshness uses monotonic receive time. Zero, repeated, and out-of-order PX4
-timestamps cannot refresh caches, and exactly one publisher is required for
+Freshness carries the age of Agent-translated system timestamps into a
+monotonic expiry deadline, preserving the base branch's source-age checks.
+Zero, repeated, out-of-order, future-dated or already-stale PX4 timestamps
+cannot refresh caches, and exactly one publisher is required for
 each source. Status from another target system/component is ignored. Fast
 position/odometry data expires after 500 ms; status, GPS, flags, battery and
 landing expire after two seconds. Invalid/stale velocity and battery readings
 are NaN. Position, armed/mode and landed caches remain last-known values behind
-their explicit freshness flags. A PX4 reboot changes its timestamp epoch;
-restart this interface after a controller reboot to reset the monotonic checks.
+their explicit freshness flags. A backward timestamp epoch or host-clock reset
+can invalidate the stored watermarks; restart the interface after clocks are
+synchronized if fresh source timestamps cannot advance beyond them.
 
 Live verification checks the runtime profile and absence of all `/fmu/in/`
 publishers. Legacy live telemetry requires only the five supported streams and

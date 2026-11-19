@@ -32,6 +32,7 @@ def generate_test_description():
             name='mission_' + name, remappings=remaps,
             parameters=[{
                 'use_sim_time': True, 'enable_stage_feedback': future,
+                'stage_feedback_authority': 'mission_test_client',
                 'telemetry_timeout_ms': 200, 'safety_timeout_ms': 200,
                 'feedback_timeout_ms': 200, 'arming_handoff_timeout_ms': 400,
                 'mission_timeout_ms': 20000, 'preflight_timeout_ms': 1200,
@@ -65,6 +66,7 @@ class TestMissionNode(unittest.TestCase):
                 cls.clients[name, operation] = client
         cls.enabled = False
         cls.safety_enabled = True
+        cls.advance_stamps = True
         cls.drone = DroneState()
         cls.safety = S()
         cls.timer = cls.node.create_timer(
@@ -77,6 +79,10 @@ class TestMissionNode(unittest.TestCase):
     @classmethod
     def tick(cls):
         if cls.enabled:
+            stamp = Clock(clock_type=ClockType.SYSTEM_TIME).now().to_msg()
+            if cls.advance_stamps:
+                cls.drone.last_update_time = stamp
+                cls.safety.timestamp = stamp
             cls.drone_pub.publish(cls.drone)
             if cls.safety_enabled:
                 cls.safety_pub.publish(cls.safety)
@@ -144,7 +150,8 @@ class TestMissionNode(unittest.TestCase):
 
     def feedback(self, event, name='future'):
         state = self.states[name][-1]
-        f = F(mission_id=state.mission_id, transition_sequence=state.transition_sequence,
+        f = F(timestamp=Clock(clock_type=ClockType.SYSTEM_TIME).now().to_msg(),
+              mission_id=state.mission_id, transition_sequence=state.transition_sequence,
               observation_sequence=time.monotonic_ns(), verified=True, event=event)
         self.feedback_pub[name].publish(f)
 
@@ -243,6 +250,18 @@ class TestMissionNode(unittest.TestCase):
         self.assertEqual(self.states['passive'][-1].timestamp.sec, 0)
         self.wait_state(M.ABORTED)
         self.assertIn('timed out', self.states['passive'][-1].transition_reason)
+
+    def test_07_replayed_snapshots_cannot_extend_mission_leases(self):
+        self.ground()
+        self.assertTrue(self.call('start').success)
+        self.wait_state(M.PREFLIGHT)
+        type(self).advance_stamps = False
+        try:
+            self.wait_state(M.RECOVERY)
+            self.assertFalse(self.states['passive'][-1].telemetry_fresh)
+            self.assertFalse(self.states['passive'][-1].safety_fresh)
+        finally:
+            type(self).advance_stamps = True
 
 
 @launch_testing.post_shutdown_test()

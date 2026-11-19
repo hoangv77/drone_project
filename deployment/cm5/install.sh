@@ -23,6 +23,9 @@ sudo apt-get update
 sudo apt-get install -y git build-essential cmake python3-colcon-common-extensions \
     python3-rosdep python3-yaml libspdlog-dev libssl-dev libtinyxml2-dev ros-humble-ros-base \
     ros-humble-fastrtps ros-humble-fastcdr ros-humble-rmw-fastrtps-cpp
+if [[ ${DRONE_WITH_VISION:-0} == 1 ]]; then
+    sudo apt-get install -y ffmpeg ros-humble-camera-calibration
+fi
 if ! sudo test -f /etc/ros/rosdep/sources.list.d/20-default.list; then
     sudo rosdep init
 fi
@@ -37,6 +40,8 @@ sudo test -d /opt/drone/releases ||
 # The operator can publish a symlink and append deployment records here.
 sudo test -d /opt/drone/state ||
     sudo install -d -m 0755 -o "$(id -un)" /opt/drone/state
+sudo install -d -m 0755 /opt/drone/recovery
+sudo install -m 0644 "$here/activation.py" /opt/drone/recovery/activation.py
 install_default "$here/config/drone.env.example" /etc/drone/drone.env
 install_default "$here/config/fastdds.xml" /etc/drone/fastdds.xml
 for unit in drone-agent.service drone-stack.service; do

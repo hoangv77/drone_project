@@ -306,3 +306,47 @@ implementation was not changed.
 `prepare_px4_msgs.py` and the message package template were inspected and retain
 their existing firmware-copy/generation behavior. Firmware source, generated
 definitions and validation build outputs are not application source changes.
+
+## Merge validation — 2026-11-18
+
+PR #9 was reconciled with `main` at
+`7fe96e3db368a668318d654324e9ce12dfd8ca89`. The merge retains the legacy passive
+profile alongside the base branch's explicit SITL opt-in, localhost/domain
+restriction, safety/mission authorization, timestamp-age/ACK checks, activation
+journal recovery and optional vision verification. The pinned legacy firmware's
+`dds_topics.h.em` and `Tools/msg/templates/ucdr/msg.h.em` confirm outgoing
+timestamps include the Agent time offset. Legacy test publishers now use that
+translated system-clock timestamp contract. CI and WSL helpers pass explicit
+profile arguments.
+
+Validation used the retained overlays and the commands below:
+
+```bash
+PX4_LEGACY_SOURCE="$PWD/.phase6/compat-validation/vendor-firmware" \
+PX4_MODERN_SOURCE=/home/hoang/PX4-Autopilot \
+PX4_MODERN_COMMIT=97a3c7f01793e2b0b9e5a30425b8e88e69741f27 \
+  python3 -m unittest discover -s deployment/cm5/tests -v
+VALIDATION_JOBS=8 bash deployment/cm5/tests/validate_profiles.sh \
+  /home/hoang/drone-px4-compat-20261117 \
+  .phase6/compat-validation/vendor-firmware /home/hoang/PX4-Autopilot \
+  97a3c7f01793e2b0b9e5a30425b8e88e69741f27 --resume
+python3 -m unittest discover -s drone_project/simulation/test -v
+PYTHONPATH=drone_project/vision python3 -m unittest discover -s drone_project/vision/test -v
+```
+
+Both four-package ROS builds and both installed-schema checks passed. Legacy
+ROS/GTest validation reported 86 tests, zero failures; both profile onboard
+launch checks passed. The schema/deployment suite ran 37 tests with two opt-in
+skips; simulation ran seven successful tests; vision ran 11 tests with four
+opt-in skips. All 46 tracked Python files compiled, shell syntax checks passed,
+and the workflow YAML parsed.
+
+The unfiltered modern run reported failures in the mode-intention case and an
+existing throw-fixture timeout. Logs show a backward WSL system-clock step
+during the pending command; the retained clock-discontinuity guard correctly
+rejected it. A full interface rerun reproduced that environment-sensitive
+result (39 of 40 active cases passed). The exact mode-intention test and its
+shutdown assertion passed when run alone, without changing its assertions or
+the clock guard. The modern onboard test also passed separately. These results
+do not claim a fully green modern runtime suite or physical/ARM64 validation.
+Merge logs are retained as `.phase6/compat-validation/merge-*.log`.

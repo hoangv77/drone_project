@@ -10,7 +10,9 @@ User=drone-runtime
 StateDirectory=drone-runtime
 Environment=ROS_LOG_DIR=/var/lib/drone-runtime/log
 EnvironmentFile=/etc/drone/drone.env
-ExecStart=/bin/bash /opt/drone/state/current/source/deployment/cm5/run.sh stack
+ExecStartPre=+/usr/bin/python3 -I /opt/drone/recovery/activation.py boot
+ExecStart=/usr/bin/python3 -I /opt/drone/recovery/activation.py launch stack
+ReadWritePaths=/opt/drone/state
 Restart=always
 RestartSec=5s
 TimeoutStopSec=30s

@@ -12,6 +12,7 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--scenario', default='valid')
     parser.add_argument('--test', action='store_true', help='Explicit permission to request launch and run selected test')
+    parser.add_argument('--metrics', type=Path, help='Report path for --test')
     args = parser.parse_args()
     repo = Path(__file__).resolve().parents[3]
     tools = Path(__file__).resolve().parent
@@ -21,6 +22,11 @@ def main():
     trial=args.scenario+'-'+time.strftime('%Y%m%d-%H%M%S')
     runtime = run/('runtime-'+trial)
     env = dict(os.environ, PHASE6_RUN_DIR=str(runtime.parent/runtime.name))
+    domain = env.get('ROS_DOMAIN_ID', '61')
+    if not domain.isdecimal() or not 1 <= int(domain) <= 99:
+        raise SystemExit('SITL requires a dedicated ROS_DOMAIN_ID in 1..99')
+    env.update(ROS_LOCALHOST_ONLY='1', ROS_DOMAIN_ID=domain,
+               PX4_PARAM_UXRCE_DDS_DOM_ID=domain, PX4_PARAM_UXRCE_DDS_PTCFG='1')
     agent = os.environ.get('MICRO_XRCE_AGENT', str(Path.home()/'Micro-XRCE-DDS-Agent/build/MicroXRCEAgent'))
     if subprocess.run(['pgrep','-x','px4'], capture_output=True).returncode == 0:
         raise SystemExit('A PX4 process is already running; stop it before starting an isolated scenario')
@@ -40,16 +46,23 @@ def main():
                       'px4_bin:='+str(px4/'build/px4_sitl_default/bin'),
                       'observer_script:='+str(tools/'native_observer.py')])
         if args.test:
-            result = subprocess.run(['python3',str(tools/'run_scenario.py'),'--scenario',args.scenario,
-                                     '--output',str(run/(trial+'-metrics.json'))], env=env)
-            return result.returncode
+            metrics = args.metrics or run/(trial+'-metrics.json')
+            with subprocess.Popen(['python3', str(tools/'run_scenario.py'), '--scenario', args.scenario,
+                                   '--output', str(metrics)], env=env, start_new_session=True) as test:
+                children.append(test)
+                while test.poll() is None:
+                    if any(child.poll() is not None for child in children if child is not test):
+                        test.terminate()
+                        raise RuntimeError('SITL dependency exited during test; inspect '+str(run))
+                    time.sleep(0.1)
+                return test.returncode
         print('SITL stack started. Launch requires /drone/mission/start or a separate run_scenario.py request.', flush=True)
         while True:
             for child in children:
                 if child.poll() is not None: raise RuntimeError('Stack process exited; inspect '+str(run))
             time.sleep(0.5)
     except KeyboardInterrupt:
-        return 0
+        return 130 if args.test else 0
     finally:
         for child in reversed(children):
             if child.poll() is None:

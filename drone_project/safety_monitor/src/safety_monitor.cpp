@@ -1,4 +1,5 @@
 #include <rclcpp/rclcpp.hpp>
+#include <px4_interface_node/msg/command_context.hpp>
 #include <rcl_interfaces/msg/parameter_descriptor.hpp>
 #include <safety_monitor/safety_policy.hpp>
 
@@ -48,6 +49,10 @@ public:
     state_timeout_ = std::chrono::milliseconds(timeout_ms);
     publisher_ = create_publisher<safety_monitor::Status>(
       "/drone/safety_status", rclcpp::QoS(1).reliable().durability_volatile());
+    if (declare_parameter("publish_command_safety", false)) {
+      command_context_ = create_publisher<px4_interface_node::msg::CommandContext>(
+        "/drone/command_safety", 1);
+    }
     subscription_ = create_subscription<safety_monitor::State>(
       "/drone/state", rclcpp::QoS(1).best_effort().durability_volatile(),
       [this](safety_monitor::State::SharedPtr state) {
@@ -90,6 +95,23 @@ private:
       last_reason_ = status.reason;
     }
     publisher_->publish(status);
+    if (command_context_) {
+      px4_interface_node::msg::CommandContext context;
+      context.stamp = rclcpp::Clock(RCL_SYSTEM_TIME).now();
+      const auto source_stamp = state_.last_update_time;
+      const auto source_ns = static_cast<int64_t>(source_stamp.sec) * 1000000000 + source_stamp.nanosec;
+      const auto age = rclcpp::Time(context.stamp, RCL_SYSTEM_TIME).nanoseconds() -
+        source_ns;
+      context.telemetry_healthy = status.telemetry_healthy && source_stamp.sec > 0 &&
+        source_stamp.nanosec < 1000000000u && age >= 0 && age <= 500000000 &&
+        subscription_->get_publisher_count() == 1;
+      context.launch_permitted = status.level == safety_monitor::Status::READY &&
+        status.launch_permitted;
+      context.bootstrap_permitted = status.preflight_passed && status.battery_healthy &&
+        status.position_healthy && status.gnss_healthy && status.operator_link_healthy;
+      context.recovery_eligible = context.telemetry_healthy;
+      command_context_->publish(context);
+    }
   }
   safety_monitor::Policy policy_;
   safety_monitor::State state_;
@@ -101,6 +123,7 @@ private:
   std::chrono::milliseconds state_timeout_{500};
   rclcpp::Subscription<safety_monitor::State>::SharedPtr subscription_;
   rclcpp::Publisher<safety_monitor::Status>::SharedPtr publisher_;
+  rclcpp::Publisher<px4_interface_node::msg::CommandContext>::SharedPtr command_context_;
   rclcpp::TimerBase::SharedPtr timer_;
 };
 

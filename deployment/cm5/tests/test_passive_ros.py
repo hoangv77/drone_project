@@ -72,7 +72,7 @@ class PassiveLaunchTests(unittest.TestCase):
             deadline = time.monotonic() + 8
             while time.monotonic() < deadline:
                 for name, message in messages.items():
-                    message.timestamp = time.monotonic_ns() // 1000
+                    message.timestamp = time.time_ns() // 1000
                     publishers[name].publish(message)
                 rclpy.spin_once(probe, timeout_sec=0.05)
                 if (drone[-1].status_fresh and drone[-1].position_valid and safety and

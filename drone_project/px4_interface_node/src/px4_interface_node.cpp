@@ -4,6 +4,7 @@
 
 // Our clean internal state message generated from msg/DroneState.msg.
 #include <px4_interface_node/msg/drone_state.hpp>
+#include <px4_interface_node/msg/command_context.hpp>
 #include <px4_interface_node/srv/set_flight_mode.hpp>
 #include <px4_interface_node/srv/execute_command.hpp>
 
@@ -24,9 +25,11 @@
 #include <px4_msgs/msg/vehicle_land_detected.hpp>
 
 #include <array>
+#include <algorithm>
 #include <chrono>
 #include <cmath>
 #include <cstdint>
+#include <cstdlib>
 #include <functional>
 #include <limits>
 #include <memory>
@@ -55,7 +58,17 @@ public:
         // restriction, even when a launch/YAML/CLI override supplies false.
         read_only_ = declare_parameter("read_only", px4_compatibility::passive,
             startup_only, px4_compatibility::passive);
-        const bool sitl_commands = declare_parameter("sitl_commands", true, startup_only);
+        const bool sitl_commands = declare_parameter("sitl_commands", false, startup_only);
+        if (!px4_compatibility::passive && sitl_commands && !read_only_) {
+            const auto * localhost = std::getenv("ROS_LOCALHOST_ONLY");
+            const auto * domain = std::getenv("ROS_DOMAIN_ID");
+            char * end = nullptr;
+            const auto domain_id = domain ? std::strtol(domain, &end, 10) : 0;
+            if (!localhost || std::string(localhost) != "1" || !domain || !end ||
+                *end != '\0' || domain_id < 1 || domain_id > 99) {
+                throw std::invalid_argument("SITL commands require a dedicated localhost DDS domain");
+            }
+        }
         const auto topic = [this, &startup_only](const char * name, const char * value) {
             return declare_parameter<std::string>(std::string("topics.") + name, value, startup_only);
         };
@@ -86,9 +99,8 @@ public:
             land_subscription_ = create_subscription<px4_msgs::msg::VehicleLandDetected>(
                 topic("vehicle_land_detected", "/fmu/out/vehicle_land_detected"), rclcpp::SensorDataQoS(),
                 [this](px4_msgs::msg::VehicleLandDetected::SharedPtr msg) {
-                    if (!accept_sample(msg->timestamp, last_land_timestamp_, land_subscription_)) {return;}
+                    if (!accept_sample(msg->timestamp, last_land_timestamp_, land_subscription_, last_land_rx_, status_timeout_)) {return;}
                     landed_ = msg->landed;
-                    last_land_rx_ = std::chrono::steady_clock::now();
                     has_land_ = true;
                 });
         }
@@ -147,10 +159,9 @@ public:
         failsafe_subscription_ = create_subscription<px4_msgs::msg::FailsafeFlags>(
             topic("failsafe_flags", "/fmu/out/failsafe_flags"), px4_qos,
             [this](px4_msgs::msg::FailsafeFlags::SharedPtr msg) {
-                if (!accept_sample(msg->timestamp, last_flags_timestamp_, failsafe_subscription_)) {return;}
+                if (!accept_sample(msg->timestamp, last_flags_timestamp_, failsafe_subscription_, last_failsafe_flags_rx_, slow_data_timeout_)) {return;}
                 failsafe_flags_ = *msg;
                 has_failsafe_flags_ = true;
-                last_failsafe_flags_rx_ = std::chrono::steady_clock::now();
             });
 
         // This is the clean topic consumed by nodes we control. A depth of 10
@@ -161,6 +172,10 @@ public:
                 rclcpp::QoS(10).reliable());
 
         if (!px4_compatibility::passive && !read_only_ && sitl_commands) {
+            safety_context_.subscription = subscribe_context(
+                "/drone/command_safety", "safety_monitor", safety_context_);
+            mission_context_.subscription = subscribe_context(
+                "/drone/command_mission", "throw_launch_manager", mission_context_);
             command_publisher_ = create_publisher<px4_msgs::msg::VehicleCommand>(
                 "/fmu/in/vehicle_command", rclcpp::QoS(10).reliable());
             command_ack_subscription_ = create_subscription<px4_msgs::msg::VehicleCommandAck>(
@@ -284,6 +299,8 @@ private:
         SteadyTimePoint deadline;
         uint64_t status_timestamp_at_request{0};
         uint64_t ack_timestamp{0};
+        uint64_t dispatch_timestamp{0};
+        SteadyTimePoint dispatched{};
     };
 
     struct GuardResult
@@ -291,6 +308,79 @@ private:
         uint8_t result;
         std::string message;
     };
+
+    using Context = px4_interface_node::msg::CommandContext;
+    struct ContextSource
+    {
+        Context value;
+        rclcpp::Subscription<Context>::SharedPtr subscription;
+        std::array<uint8_t, RMW_GID_STORAGE_SIZE> gid{};
+        SteadyTimePoint received{};
+        int64_t stamp_ns{0};
+        std::string authority;
+    };
+    ContextSource safety_context_, mission_context_;
+
+    rclcpp::Subscription<Context>::SharedPtr subscribe_context(
+        const char * topic, const char * authority, ContextSource & source)
+    {
+        source.authority = authority;
+        return create_subscription<Context>(topic, 1,
+            [&source](Context::SharedPtr message, const rclcpp::MessageInfo & info) {
+                if (message->stamp.sec <= 0 || message->stamp.nanosec >= 1000000000u) {return;}
+                const auto stamp = rclcpp::Time(message->stamp, RCL_SYSTEM_TIME).nanoseconds();
+                const auto age = rclcpp::Clock(RCL_SYSTEM_TIME).now().nanoseconds() - stamp;
+                if (stamp <= source.stamp_ns || age < 0 || age > 500000000) {return;}
+                const auto & gid = info.get_rmw_message_info().publisher_gid;
+                std::copy_n(gid.data, source.gid.size(), source.gid.begin());
+                source.value = *message;
+                source.received = std::chrono::steady_clock::now();
+                source.stamp_ns = stamp;
+            });
+    }
+
+    bool valid_context(const ContextSource & source, SteadyTimePoint steady_now) const
+    {
+        const auto age = rclcpp::Clock(RCL_SYSTEM_TIME).now().nanoseconds() - source.stamp_ns;
+        if (age < 0 || age > 500000000 || steady_now - source.received > std::chrono::milliseconds(500)) {
+            return false;
+        }
+        const auto endpoints = get_publishers_info_by_topic(source.subscription->get_topic_name());
+        return endpoints.size() == 1 && endpoints.front().node_name() == source.authority &&
+               endpoints.front().node_namespace() == "/" && endpoints.front().endpoint_gid() == source.gid;
+    }
+
+    bool authorized(uint8_t kind, const FlightMode * mode, SteadyTimePoint steady_now) const
+    {
+        if (!valid_context(safety_context_, steady_now) || !valid_context(mission_context_, steady_now) ||
+            command_publisher_->get_subscription_count() != 1 ||
+            get_publishers_info_by_topic(command_publisher_->get_topic_name()).size() != 1 ||
+            status_subscription_->get_publisher_count() != 1 ||
+            land_subscription_->get_publisher_count() != 1) {
+            return false;
+        }
+        const auto phase = mission_context_.value.phase;
+        const auto & safety = safety_context_.value;
+        const bool fresh_ground = is_fresh(has_land_, last_land_rx_, status_timeout_, steady_now) && landed_;
+        if (kind == CommandRequest::DISARM) {
+            return phase == Context::RECOVERY && safety.recovery_eligible && armed_ && fresh_ground;
+        }
+        if (kind == CommandRequest::SET_MODE &&
+            (mode->name == std::string("LAND") || mode->name == std::string("RTL"))) {
+            return phase == Context::RECOVERY && safety.recovery_eligible && armed_ &&
+                   is_fresh(has_land_, last_land_rx_, status_timeout_, steady_now) && !landed_;
+        }
+        if (kind == CommandRequest::SET_MODE && mode->name == std::string("LOITER") &&
+            phase == Context::IDLE) {
+            // Disarmed bootstrap so the monitor can evaluate the required LOITER mode.
+            return !armed_ && fresh_ground && safety.telemetry_healthy && safety.bootstrap_permitted &&
+                   pre_flight_checks_pass_ && !failsafe_;
+        }
+        return phase == Context::PREFLIGHT && !armed_ && fresh_ground &&
+               safety.telemetry_healthy && safety.launch_permitted &&
+               (kind == CommandRequest::ARM || kind == CommandRequest::RUN_PREFLIGHT_CHECKS ||
+                (kind == CommandRequest::SET_MODE && mode->name == std::string("LOITER")));
+    }
 
     GuardResult command_guard(
         uint8_t kind, const FlightMode * mode, const SteadyTimePoint & steady_now) const
@@ -361,7 +451,7 @@ private:
         response.command = kind;
         response.ack_result = CommandResponse::NO_ACK;
         if (!command_publisher_) {
-            respond(response, CommandResponse::REJECTED, "PX4 interface is read-only", complete);
+            respond(response, CommandResponse::REJECTED, "PX4 interface is read-only or SITL commands are disabled", complete);
             return;
         }
         const FlightMode * mode = nullptr;
@@ -391,6 +481,10 @@ private:
             respond(response, guard.result, guard.message, complete);
             return;
         }
+        if (!authorized(kind, mode, steady_now)) {
+            respond(response, CommandResponse::REJECTED, "SITL command authorization denied", complete);
+            return;
+        }
 
         px4_msgs::msg::VehicleCommand command;
         if (kind == CommandRequest::SET_MODE) {
@@ -411,8 +505,11 @@ private:
         pending_command_->mode = mode;
         pending_command_->px4_command = command.command;
         pending_command_->deadline = steady_now + ack_timeout_;
-        pending_command_->status_timestamp_at_request = last_status_timestamp_;
-        command.timestamp = static_cast<uint64_t>(now().nanoseconds() / 1000);
+        command.timestamp = system_time_us();
+        pending_command_->dispatch_timestamp = command.timestamp;
+        pending_command_->dispatched = steady_now;
+        pending_command_->status_timestamp_at_request =
+            std::max({last_status_timestamp_, last_ack_timestamp_, command.timestamp});
         command.target_system = target_system_;
         command.target_component = target_component_;
         command.source_system = source_system_;
@@ -431,7 +528,8 @@ private:
             msg->target_system != source_system_ ||
             msg->target_component != source_component_ || msg->from_external ||
             msg->timestamp <= pending_command_->status_timestamp_at_request ||
-            msg->timestamp <= pending_command_->ack_timestamp)
+            msg->timestamp <= last_ack_timestamp_ ||
+            msg->timestamp > system_time_us())
         {
             return;
         }
@@ -439,6 +537,7 @@ private:
         pending_command_->response.ack_result_param1 = msg->result_param1;
         pending_command_->response.ack_result_param2 = msg->result_param2;
         pending_command_->ack_timestamp = msg->timestamp;
+        last_ack_timestamp_ = msg->timestamp;
         if (msg->result == CommandAck::VEHICLE_CMD_RESULT_IN_PROGRESS) {
             return;  // Progress never extends the terminal-ACK deadline.
         }
@@ -458,6 +557,13 @@ private:
             return;
         }
         const auto steady_now = std::chrono::steady_clock::now();
+        const auto expected = pending_command_->dispatch_timestamp + static_cast<uint64_t>(
+            std::chrono::duration_cast<std::chrono::microseconds>(steady_now - pending_command_->dispatched).count());
+        const auto wall = system_time_us();
+        if (std::max(wall, expected) - std::min(wall, expected) > 50000) {
+            finish_command(CommandResponse::STATUS_UNAVAILABLE, "System clock changed during command");
+            return;
+        }
         if (steady_now >= pending_command_->deadline) {
             finish_command(pending_command_->response.accepted ?
                 CommandResponse::TRANSITION_TIMEOUT : CommandResponse::ACK_TIMEOUT,
@@ -472,7 +578,7 @@ private:
         // Different DDS topics can arrive in either order. Only PX4 timestamps
         // are compared to one another; cached pre-command state cannot confirm.
         if (!pending_command_->response.accepted ||
-            last_status_timestamp_ < pending_command_->ack_timestamp)
+            last_status_timestamp_ <= pending_command_->ack_timestamp)
         {
             return;
         }
@@ -489,8 +595,27 @@ private:
         }
     }
 
-    // Freshness uses a monotonic clock rather than PX4 boot timestamps or ROS
-    // wall time. A monotonic clock is appropriate for measuring elapsed time.
+    static uint64_t system_time_us()
+    {
+        return static_cast<uint64_t>(rclcpp::Clock(RCL_SYSTEM_TIME).now().nanoseconds() / 1000);
+    }
+
+    // The pinned XRCE client translates PX4 timestamps to the Agent system clock.
+    // Carry any source age into the local monotonic freshness deadline.
+    static bool accept_sample(uint64_t stamp, uint64_t & watermark, SteadyTimePoint & sample_time,
+                              std::chrono::milliseconds limit)
+    {
+        const auto now = system_time_us();
+        const auto max_age = static_cast<uint64_t>(limit.count()) * 1000;
+        if (stamp == 0 || stamp <= watermark || stamp > now || now - stamp > max_age) {
+            return false;
+        }
+        watermark = stamp;
+        sample_time = std::chrono::steady_clock::now() - std::chrono::microseconds(now - stamp);
+        return true;
+    }
+
+    // Expiry is monotonic even if ROS time is paused.
     bool is_fresh(
         bool has_received,
         const SteadyTimePoint & last_receive_time,
@@ -501,15 +626,11 @@ private:
     }
 
     template<typename Subscription>
-    bool accept_sample(uint64_t timestamp, uint64_t & last, const Subscription & subscription)
+    bool accept_sample(uint64_t timestamp, uint64_t & watermark, const Subscription & subscription,
+                       SteadyTimePoint & sample_time, std::chrono::milliseconds limit)
     {
-        // Replayed/out-of-order samples cannot keep a dead stream fresh. A
-        // controller reboot requires restarting this interface to reset epochs.
-        if (!subscription || subscription->get_publisher_count() != 1 || timestamp == 0 || timestamp <= last) {
-            return false;
-        }
-        last = timestamp;
-        return true;
+        return subscription && subscription->get_publisher_count() == 1 &&
+            accept_sample(timestamp, watermark, sample_time, limit);
     }
 
     void status_callback(px4_msgs::msg::VehicleStatus::SharedPtr msg)
@@ -517,7 +638,7 @@ private:
         if (msg->system_id != target_system_ || msg->component_id != target_component_) {
             return;
         }
-        if (!accept_sample(msg->timestamp, last_status_timestamp_, status_subscription_)) {return;}
+        if (!accept_sample(msg->timestamp, last_status_timestamp_, status_subscription_, last_status_rx_, status_timeout_)) {return;}
         armed_ =
             msg->arming_state ==
             px4_msgs::msg::VehicleStatus::ARMING_STATE_ARMED;
@@ -531,16 +652,14 @@ private:
         calibration_enabled_ = msg->calibration_enabled;
         flight_mode_ = flight_mode_name(nav_state_);
 
-        last_status_rx_ = std::chrono::steady_clock::now();
         has_status_ = true;
-        last_status_timestamp_ = msg->timestamp;
         check_command();
     }
 
     void local_position_callback(
         px4_msgs::msg::VehicleLocalPosition::SharedPtr msg)
     {
-        if (!accept_sample(msg->timestamp, last_position_timestamp_, local_position_subscription_)) {return;}
+        if (!accept_sample(msg->timestamp, last_position_timestamp_, local_position_subscription_, last_local_position_rx_, fast_data_timeout_)) {return;}
         // These flags come from PX4's estimator. Freshness is added later in
         // publish_state() so estimator validity and communication validity stay
         // conceptually separate.
@@ -558,34 +677,30 @@ private:
         vy_ = msg->vy;
         vz_ = msg->vz;
 
-        last_local_position_rx_ = std::chrono::steady_clock::now();
         has_local_position_ = true;
     }
 
     void odometry_callback(px4_msgs::msg::VehicleOdometry::SharedPtr msg)
     {
-        if (!accept_sample(msg->timestamp, last_odometry_timestamp_, odometry_subscription_)) {return;}
+        if (!accept_sample(msg->timestamp, last_odometry_timestamp_, odometry_subscription_, last_odometry_rx_, fast_data_timeout_)) {return;}
         // Odometry is monitored for availability but does not overwrite the
         // local-position cache. Its attitude can be exposed in a later message.
-        (void)msg;
-        last_odometry_rx_ = std::chrono::steady_clock::now();
         has_odometry_ = true;
     }
 
     void gps_callback(GpsMessage::SharedPtr msg)
     {
-        if (!accept_sample(msg->timestamp, last_gps_timestamp_, gps_subscription_)) {return;}
+        if (!accept_sample(msg->timestamp, last_gps_timestamp_, gps_subscription_, last_gps_rx_, slow_data_timeout_)) {return;}
         // The profile adapter handles integer legacy coordinates and modern
         // floating coordinates/receiver usability without callback version checks.
         gps_valid_ = px4_compatibility::gps_valid(*msg);
 
-        last_gps_rx_ = std::chrono::steady_clock::now();
         has_gps_ = true;
     }
 
     void battery_callback(px4_msgs::msg::BatteryStatus::SharedPtr msg)
     {
-        if (!accept_sample(msg->timestamp, last_battery_timestamp_, battery_subscription_)) {return;}
+        if (!accept_sample(msg->timestamp, last_battery_timestamp_, battery_subscription_, last_battery_rx_, slow_data_timeout_)) {return;}
         const bool valid_remaining =
             msg->connected &&
             std::isfinite(msg->remaining) &&
@@ -598,7 +713,6 @@ private:
         battery_warning_ = msg->warning;
         battery_fault_ = msg->faults != 0 || msg->is_powering_off;
 
-        last_battery_rx_ = std::chrono::steady_clock::now();
         has_battery_ = true;
     }
 
@@ -744,6 +858,7 @@ private:
     uint64_t last_battery_timestamp_{0};
     uint64_t last_land_timestamp_{0};
     uint64_t last_flags_timestamp_{0};
+    uint64_t last_ack_timestamp_{0};
 
     // Cached normalized values. NaN means no valid measurement is known yet.
     bool armed_{false};

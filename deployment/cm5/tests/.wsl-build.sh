@@ -10,10 +10,10 @@ for name in px4_interface_node safety_monitor state_machine_manager; do
 done
 mkdir -p "$d/drone_project/simulation/tools"
 cp "$root/drone_project/simulation/tools/prepare_px4_msgs.py" "$d/drone_project/simulation/tools/"
-python3 "$d/deployment/cm5/schema.py" prepare "$d/release" "$HOME/PX4-Autopilot" 97a3c7f01793e2b0b9e5a30425b8e88e69741f27
+python3 "$d/deployment/cm5/schema.py" prepare "$d/release" "$HOME/PX4-Autopilot" 97a3c7f01793e2b0b9e5a30425b8e88e69741f27 --profile modern_px4
 source /opt/ros/humble/setup.bash
 cd "$d/release"
 export MAKEFLAGS=-j8
-colcon build --merge-install --executor sequential --base-paths px4_msgs ../drone_project/px4_interface_node ../drone_project/safety_monitor ../drone_project/state_machine_manager --cmake-args -DCMAKE_BUILD_TYPE=Release '-DCMAKE_CXX_FLAGS_RELEASE=-O1 -DNDEBUG'
+colcon build --merge-install --executor sequential --base-paths px4_msgs ../drone_project/px4_interface_node ../drone_project/safety_monitor ../drone_project/state_machine_manager --cmake-args -DPX4_COMPATIBILITY_PROFILE=modern_px4 -DCMAKE_BUILD_TYPE=Release '-DCMAKE_CXX_FLAGS_RELEASE=-O1 -DNDEBUG'
 source install/local_setup.bash
 bash "$root/deployment/cm5/tests/.wsl-final.sh"

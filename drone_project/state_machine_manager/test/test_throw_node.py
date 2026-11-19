@@ -62,6 +62,9 @@ class TestThrowNode(unittest.TestCase):
     @classmethod
     def publish(cls):
         if not cls.enabled: return
+        stamp = Clock(clock_type=ClockType.SYSTEM_TIME).now().to_msg()
+        cls.drone.last_update_time = stamp
+        cls.safety.timestamp = stamp
         if cls.telemetry: cls.dp.publish(cls.drone)
         cls.safety.phase = S.FLIGHT if cls.drone.armed else S.GROUNDED
         cls.safety.landed = cls.drone.landed

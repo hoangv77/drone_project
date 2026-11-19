@@ -139,7 +139,7 @@ class TestLegacyTelemetry(unittest.TestCase):
 
         def publish():
             for name, message in messages.items():
-                message.timestamp = time.monotonic_ns() // 1000
+                message.timestamp = time.time_ns() // 1000
                 self.pubs[name].publish(message)
             self.spin(0.04)
 
@@ -165,7 +165,7 @@ class TestLegacyTelemetry(unittest.TestCase):
         # Wrong identity, zero timestamps and replays cannot change cached state.
         status.arming_state = VehicleStatus.ARMING_STATE_STANDBY
         status.system_id = 2
-        status.timestamp = time.monotonic_ns() // 1000
+        status.timestamp = time.time_ns() // 1000
         self.pubs['/fmu/out/vehicle_status'].publish(status)
         status.system_id = 1
         status.timestamp = 0

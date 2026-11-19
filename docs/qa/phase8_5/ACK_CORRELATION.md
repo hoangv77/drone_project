@@ -1,0 +1,5 @@
+# ACK correlation
+
+QA-04. A status-only lower bound let an ACK and status pair from before the retry satisfy both checks. Each dispatch now captures the synchronized Agent-clock time and takes the maximum of that time, the last accepted status and the last consumed ACK. ACKs must advance the barrier, match the wire command/target, be non-external and arrive from a single discovered writer. Terminal confirmation requires independent status newer than the accepted ACK. The single pending request and steady-clock deadlines remain. Large wall-clock discontinuities abort confirmation.
+
+PX4 topic ACKs have no application request ID. This policy rejects delayed observations stamped before dispatch under the synchronization contract. It cannot distinguish an ACK newly generated after dispatch for an older operation, an impersonated publisher or fine clock skew across the barrier. Do not retry uncertain ARM or DISARM on physical hardware. Binding commands to a transaction-correlated PX4 protocol and proving the clock/authority model remain release prerequisites. [Dispatch, ACK and completion](../../../drone_project/px4_interface_node/src/px4_interface_node.cpp#L488)
