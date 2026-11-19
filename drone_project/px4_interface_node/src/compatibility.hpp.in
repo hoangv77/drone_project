@@ -1,0 +1,44 @@
+#pragma once
+
+#include <cmath>
+
+#define PX4_LEGACY_1_14_PASSIVE @PX4_LEGACY_1_14_PASSIVE@
+
+// One build uses one firmware-derived px4_msgs ABI. Runtime profile changes
+// cannot reinterpret a different schema or enable commands on a legacy build.
+namespace px4_compatibility
+{
+inline constexpr const char * profile = "@PX4_COMPATIBILITY_PROFILE@";
+inline constexpr bool passive = PX4_LEGACY_1_14_PASSIVE;
+inline constexpr const char * status_topic = passive ?
+    "/fmu/out/vehicle_status" : "/fmu/out/vehicle_status_v4";
+inline constexpr const char * position_topic = passive ?
+    "/fmu/out/vehicle_local_position" : "/fmu/out/vehicle_local_position_v1";
+
+template<typename Gps>
+bool gps_valid(const Gps & msg)
+{
+#if PX4_LEGACY_1_14_PASSIVE
+    // SensorGps documents fix_type >= 3 as a 3D fix; v1.14 has no FIX_TYPE_3D
+    // constant. lat/lon are signed degrees scaled by 1e7, not floating degrees.
+    return msg.fix_type >= 3 && msg.lat >= -900000000 && msg.lat <= 900000000 &&
+        msg.lon >= -1800000000 && msg.lon <= 1800000000;
+#elif __has_include(<px4_msgs/msg/sensor_gps.hpp>)
+    return msg.fix_type >= Gps::FIX_TYPE_3D &&
+        std::isfinite(msg.latitude_deg) && std::isfinite(msg.longitude_deg);
+#else
+    return msg.usable && msg.receiver.fix_type >= px4_msgs::msg::SensorGnss::FIX_TYPE_3D &&
+        std::isfinite(msg.receiver.latitude) && std::isfinite(msg.receiver.longitude);
+#endif
+}
+
+template<typename Flags>
+bool geofence_breached(const Flags & msg)
+{
+#if PX4_LEGACY_1_14_PASSIVE
+    return msg.primary_geofence_breached;
+#else
+    return msg.geofence_breached;
+#endif
+}
+}  // namespace px4_compatibility

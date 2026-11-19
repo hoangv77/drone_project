@@ -70,6 +70,7 @@ class LinuxShellTests(unittest.TestCase):
         for path in (self.bin, self.opt / 'state', self.opt / 'releases', self.etc):
             path.mkdir(parents=True)
         self.env = dict(os.environ, PATH=f'{self.bin}:{os.environ["PATH"]}')
+        self.env.pop('PX4_COMPATIBILITY_PROFILE', None)
         self.env['TEST_LOG'] = str(self.work / 'calls')
         for name in ('lib.sh', 'run.sh', 'update.sh'):
             fixture = (CM5 / name).read_text().replace('/opt/drone', str(self.opt))
@@ -112,10 +113,23 @@ class LinuxShellTests(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertIn('Missing absent-drone-command', result.stderr)
 
+    def test_runtime_profile_requires_explicit_supported_selection(self):
+        for profile in [None, 'auto', 'modern_px4', 'legacy_1_14_passive']:
+            with self.subTest(profile=profile):
+                setting = f'PX4_COMPATIBILITY_PROFILE={profile}\n' if profile else ''
+                (self.etc / 'drone.env').write_text('ROS_DOMAIN_ID=42\n' + setting)
+                result = self.shell('-c', '. ./lib.sh; load_runtime_config')
+                if profile in ('modern_px4', 'legacy_1_14_passive'):
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                else:
+                    self.assertNotEqual(result.returncode, 0)
+                    self.assertIn('Set explicit PX4_COMPATIBILITY_PROFILE', result.stderr)
+
     def agent(self, transport, body):
         (self.work / 'ros').mkdir()
         (self.work / 'ros/setup.bash').touch()
         (self.etc / 'drone.env').write_text(
+            'PX4_COMPATIBILITY_PROFILE=modern_px4\n'
             f'ROS_DOMAIN_ID=42\nPX4_TRANSPORT={transport}\n'
             'PX4_SERIAL_DEVICE=/dev/nonexistent-cm5-test\nPX4_AGENT_UDP_PORT=8888\n')
         path = self.opt / 'agent-v2.4.2/bin'
@@ -146,6 +160,8 @@ class LinuxShellTests(unittest.TestCase):
         self.assertEqual(destination.read_text(), 'operator edit\n')
 
     def test_failed_update_health_check_rolls_back_running_services(self):
+        (self.etc / 'drone.env').write_text(
+            'PX4_COMPATIBILITY_PROFILE=modern_px4\nROS_DOMAIN_ID=42\n')
         old = self.opt / 'releases/old'
         old.mkdir()
         current = self.opt / 'state/current'

@@ -29,7 +29,10 @@ case ${1:-} in
         ;;
     stack)
         source_overlay "$here/../../.."
-        exec ros2 launch "$here/launch/onboard.launch.py" "${@:2}"
+        python3 "$here/schema.py" verify "$here/../../.." "$(ros2 pkg prefix px4_msgs)" \
+            --profile "$PX4_COMPATIBILITY_PROFILE"
+        exec ros2 launch "$here/launch/onboard.launch.py" \
+            "compatibility_profile:=$PX4_COMPATIBILITY_PROFILE" "${@:2}"
         ;;
     *) die "Usage: bash run.sh agent|stack [ROS launch arguments]" ;;
 esac

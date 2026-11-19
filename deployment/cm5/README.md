@@ -1,5 +1,11 @@
 # CM5 passive deployment
 
+PX4 firmware contracts are explicit: `modern_px4` preserves the modern SITL ABI;
+`legacy_1_14_passive` pins vendor PX4 1.14.3 and forces telemetry-only operation.
+See [compatibility profiles and validation](COMPATIBILITY.md) before building.
+The profile is selected at build time and must match runtime configuration.
+
+
 The CM5 runs a Micro XRCE-DDS Agent and a separate ROS 2 Humble launch under systemd as `drone-runtime`. The Agent bridges one PX4 controller. The ROS stack publishes state, safety and mission telemetry. The command API stays available for compatibility and rejects requests in read-only mode. The passive manager starts in STANDBY and rejects operator control requests. It consumes telemetry with stage feedback disabled. The launch checks the local DDS graph for competing mission managers and PX4 command publishers before starting and while running. Use one dedicated domain for this stack. Graph checks depend on discovery and supervise only this launch. Restrict access to the DDS network and the host. [Repository audit](AUDIT.md)
 
 ## Select and flash the OS
@@ -49,25 +55,33 @@ On Jammy, enable Ubuntu Universe, then download the official Jammy `ros2-apt-sou
 sudo apt-get update
 sudo apt-get install -y git software-properties-common
 sudo add-apt-repository -y universe
-git clone --branch codex/phase7-cm5-deployment https://github.com/hoangv77/drone_project.git
+# Set DRONE_REVISION to a published application commit/tag/branch containing
+# the compatibility profiles described in this guide.
+git clone https://github.com/hoangv77/drone_project.git
 cd drone_project
+git fetch origin "$DRONE_REVISION"
+git checkout --detach FETCH_HEAD
 bash deployment/cm5/install.sh "$HOME/ros2-apt-source.deb"
 ```
 
 Select `PX4_COMMIT` as the full firmware source SHA from the controller console's `ver all` and the exact flashed build's records. For a custom build, its committed source must include local schema and `dds_topics.yaml` changes. Record the board target, firmware artifact checksum and DDS client configuration. The client must support XRCE v2. Clone the firmware source (or supply the exact matching vendor Git repository) and fetch the commit. For **isolated Phase 6 SITL only**, use `97a3c7f01793e2b0b9e5a30425b8e88e69741f27`.
 
 ```bash
-git clone --no-checkout https://github.com/PX4/PX4-Autopilot.git "$HOME/px4-firmware-source"
+# Legacy hardware source; reuse your existing exact vendor repository if present.
+git clone --no-checkout https://github.com/Minderring/PX4-Autopilot.git "$HOME/px4-firmware-source"
 PX4_SOURCE="$HOME/px4-firmware-source"
-# Set PX4_COMMIT to the audited 40-character commit, then run:
+PX4_COMMIT=4a0e65f2331b23b9c8352656e9ccb6edeaea5d6c
+PROFILE=legacy_1_14_passive
+# For modern SITL use the upstream PX4 source, the audited modern commit,
+# and PROFILE=modern_px4 instead.
 git -C "$PX4_SOURCE" fetch origin "$PX4_COMMIT"
-bash deployment/cm5/build.sh "$PX4_SOURCE" "$PX4_COMMIT"
+bash deployment/cm5/build.sh "$PX4_SOURCE" "$PX4_COMMIT" "$PROFILE"
 # Set RELEASE to the full "Verified release" path printed by build.sh.
-bash deployment/cm5/verify.sh build "$RELEASE"
+bash deployment/cm5/verify.sh build "$RELEASE" "$PROFILE" "$PX4_COMMIT"
 bash deployment/cm5/update.sh --activate "$RELEASE"
 ```
 
-The build uses a clean Git snapshot and a new directory under `/opt/drone/releases`. The schema tool extracts the exact firmware Git objects, stages `px4_msgs` using the Phase 6 tool, checks telemetry topic types and version suffixes against the node's contract, and records the SHA, DDS configuration digest, message versions and schema hashes in `schema.json`. Compilation catches unsupported fields and constants. The installed schema files are checked against the manifest. This establishes source/overlay consistency. Match the connected device to the firmware artifact separately. The build uses sequential colcon and single-job compilation. The installer leaves services disabled on a fresh installation.
+The build uses a clean Git snapshot and a new directory under `/opt/drone/releases`. The schema tool extracts the exact firmware Git objects, stages `px4_msgs` using the Phase 6 tool, and validates the selected contract, required fields/constants, and nested message dependencies. `schema.json` records the profile, firmware SHA, DDS configuration digest, message versions (null for absent declarations), all input/schema hashes, and required/unavailable publications. The legacy inputs also match the checked-in exact firmware digests. Installed schemas, staged inputs, and the compiled interface profile are checked during verification. This establishes source/overlay consistency. Match the connected device to the firmware artifact separately. The build uses sequential colcon and single-job compilation. The installer leaves services disabled on a fresh installation.
 
 ## Connect PX4 and start monitoring
 
@@ -77,6 +91,7 @@ Use QGroundControl/PX4 console and the exact firmware's parameter docs to set `U
 
 ```bash
 sudoedit /etc/drone/drone.env
+# Set PX4_COMPATIBILITY_PROFILE to the profile selected at build time.
 # Set PX4_TRANSPORT=serial (UART), usb (USB serial), or udp (SITL).
 # Set PX4_SERIAL_DEVICE and PX4_BAUD_RATE for serial/USB.
 # Set PX4_AGENT_UDP_PORT for UDP, and match ROS_DOMAIN_ID on PX4.
@@ -106,13 +121,13 @@ The stack can monitor a disconnected controller. An unavailable serial device or
 ## Verification and diagnostics
 
 ```bash
-bash deployment/cm5/verify.sh passive   # disconnected launch and interlocks
-bash deployment/cm5/verify.sh sitl      # isolated UDP SITL
-bash deployment/cm5/verify.sh hardware  # propeller-free serial or USB bench
+bash deployment/cm5/verify.sh passive "$RELEASE" "$PROFILE"   # disconnected launch and interlocks
+bash deployment/cm5/verify.sh sitl "$RELEASE" "$PROFILE"      # isolated UDP SITL
+bash deployment/cm5/verify.sh hardware "$RELEASE" "$PROFILE"  # propeller-free serial or USB bench
 sudo journalctl -u drone-stack -u drone-agent -b --no-pager
 ```
 
-Live checks require a dedicated domain and verify the state, safety and mission streams. SITL/bench modes also require a running Agent and fresh PX4 data, with observed landed/disarmed state. A fresh safety report can legitimately say BLOCKED. Review the safety reasons before any later flight work.
+Live checks require a dedicated domain and verify the state, safety and mission streams. SITL/bench modes also require a running Agent and fresh PX4 data on the profile's required streams. Modern checks require landed/disarmed confirmation. Legacy checks require disarmed status and explicitly report landing state as unknown; missing battery/landing telemetry must remain unavailable. This does not establish vehicle readiness. A fresh safety report can legitimately say BLOCKED. Review the safety reasons before any later flight work.
 
 For ROS CLI diagnostics in the same machine or system container:
 
@@ -139,8 +154,8 @@ SSH to the CM5 and enter Jammy if using LXD. Use the same operator account and a
 ssh OPERATOR@CM5_ADDRESS
 # For LXD: sudo lxc exec drone-humble -- sudo -iu ubuntu
 cd ~/drone_project
-bash deployment/cm5/update.sh "$APPROVED_GIT_REF" "$PX4_SOURCE" "$PX4_COMMIT"
-bash deployment/cm5/verify.sh passive
+bash deployment/cm5/update.sh "$APPROVED_GIT_REF" "$PX4_SOURCE" "$PX4_COMMIT" "$PROFILE"
+bash deployment/cm5/verify.sh passive "$RELEASE" "$PROFILE"
 # To roll back, select the previous verified path from deployments.log:
 bash deployment/cm5/update.sh --activate "$PREVIOUS_RELEASE"
 ```
@@ -153,7 +168,7 @@ Run deployment tests inside the supported userspace. Use an isolated host/domain
 python3 -m unittest discover -s deployment/cm5/tests -v
 source /opt/ros/humble/setup.bash
 source "$RELEASE/install/local_setup.bash"
-CM5_TEST_ROS=1 python3 -m unittest discover -s deployment/cm5/tests -v
+PX4_COMPATIBILITY_PROFILE="$PROFILE" CM5_TEST_ROS=1 python3 -m unittest discover -s deployment/cm5/tests -v
 CM5_TEST_SYSTEMD=1 python3 -m unittest discover -s deployment/cm5/tests -p test_systemd.py -v
 (cd "$RELEASE" && colcon test --merge-install --packages-select px4_interface_node safety_monitor state_machine_manager)
 (cd "$RELEASE" && colcon test-result --verbose)

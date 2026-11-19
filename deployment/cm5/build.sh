@@ -3,7 +3,8 @@ set -euo pipefail
 here=$(cd "$(dirname "$0")" && pwd)
 . "$here/lib.sh"
 
-[[ $# == 2 ]] || die "Usage: bash build.sh PX4_SOURCE_REPO FULL_PX4_COMMIT"
+[[ $# == 3 ]] || die "Usage: bash build.sh PX4_SOURCE_REPO FULL_PX4_COMMIT COMPATIBILITY_PROFILE"
+case $3 in modern_px4|legacy_1_14_passive) ;; *) die "Unknown compatibility profile: $3";; esac
 require_platform
 umask 022
 need git colcon rosdep cmake flock sudo
@@ -23,14 +24,15 @@ git -C "$repo" archive "$commit" | tar -xf - -C "$release/source"
 printf '%s\n' "$commit" > "$release/commit"
 scripts=$release/source/deployment/cm5
 packages=$release/source/drone_project
-python3 "$scripts/schema.py" prepare "$release" "$1" "$2"
+python3 "$scripts/schema.py" prepare "$release" "$1" "$2" --profile "$3"
 paths=("$release/px4_msgs" "$packages/px4_interface_node" "$packages/safety_monitor"
        "$packages/state_machine_manager")
 rosdep install --from-paths "${paths[@]}" --ignore-src --rosdistro humble -y
 export CMAKE_BUILD_PARALLEL_LEVEL=1 MAKEFLAGS=-j1
 cd "$release"
 colcon --log-base log build --base-paths "${paths[@]}" \
-    --merge-install --executor sequential --cmake-args -DCMAKE_BUILD_TYPE=Release
-bash "$scripts/verify.sh" build "$release"
+    --merge-install --executor sequential --cmake-args -DCMAKE_BUILD_TYPE=Release \
+    -DPX4_COMPATIBILITY_PROFILE="$3"
+bash "$scripts/verify.sh" build "$release" "$3" "$2"
 touch "$release/verified"
 printf 'Verified release: %s\n' "$release"

@@ -3,10 +3,12 @@ set -euo pipefail
 trap 'code=$?; if (( code == 0 )); then echo "PASS verification completed"; else echo "FAIL verification"; fi' EXIT
 here=$(cd "$(dirname "$0")" && pwd)
 . "$here/lib.sh"
-mode=${1:-build}
-release=${2:-/opt/drone/state/current}
-(( $# <= 2 )) || die "Expected a verification mode and optional release path."
-case $mode in build|passive|sitl|hardware) ;; *) die "Usage: bash verify.sh [build|passive|sitl|hardware] [release]";; esac
+(( $# == 3 || $# == 4 )) || die "Usage: bash verify.sh MODE RELEASE COMPATIBILITY_PROFILE [FULL_PX4_COMMIT]"
+mode=$1
+release=$2
+profile=$3
+case $mode in build|passive|sitl|hardware) ;; *) die "Unknown verification mode: $mode";; esac
+case $profile in modern_px4|legacy_1_14_passive) ;; *) die "Unknown compatibility profile: $profile";; esac
 
 trap 'printf "FAIL verification aborted at line %s\n" "$LINENO" >&2' ERR
 # Run in a subshell so die() contributes a check result.
@@ -28,13 +30,16 @@ for interface in px4_msgs/msg/FailsafeFlags px4_msgs/msg/VehicleStatus \
     ros2 interface show "$interface" >/dev/null
 done
 echo 'PASS installed packages, executables and ROS interfaces'
-python3 "$here/schema.py" verify "$release" "$(ros2 pkg prefix px4_msgs)"
+pin=()
+if (( $# == 4 )); then pin=(--firmware-commit "$4"); fi
+python3 "$here/schema.py" verify "$release" "$(ros2 pkg prefix px4_msgs)" --profile "$profile" "${pin[@]}"
 echo 'PASS installed schemas match the selected source revision'
 if [[ $mode == build ]]; then
     echo 'SKIP live DDS, telemetry, mission and command interlock checks (build only)'
     exit 0
 fi
 load_runtime_config
+[[ $PX4_COMPATIBILITY_PROFILE == "$profile" ]] || die "FAIL runtime profile differs from verified release."
 if [[ $mode == hardware ]]; then
     [[ $PX4_TRANSPORT == serial || $PX4_TRANSPORT == usb ]] ||
         die "FAIL hardware verification expects a dedicated serial or USB connection."
@@ -51,6 +56,6 @@ else
     echo 'FAIL DDS Agent unit inactive'
     status=1
 fi
-python3 "$here/health.py" "$mode" || status=1
+python3 "$here/health.py" "$mode" "$profile" || status=1
 echo 'SKIP live firmware identity and vehicle readiness require separate operator evidence'
 exit "$status"

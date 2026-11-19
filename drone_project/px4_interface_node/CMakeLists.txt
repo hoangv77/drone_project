@@ -4,6 +4,19 @@ cmake_minimum_required(VERSION 3.8)
 # Define the package/project name. This must match the name in package.xml.
 project(px4_interface_node)
 
+set(PX4_COMPATIBILITY_PROFILE "modern_px4" CACHE STRING "PX4 firmware contract")
+set_property(CACHE PX4_COMPATIBILITY_PROFILE PROPERTY STRINGS modern_px4 legacy_1_14_passive)
+if(PX4_COMPATIBILITY_PROFILE STREQUAL "legacy_1_14_passive")
+  set(PX4_LEGACY_1_14_PASSIVE 1)
+elseif(PX4_COMPATIBILITY_PROFILE STREQUAL "modern_px4")
+  set(PX4_LEGACY_1_14_PASSIVE 0)
+else()
+  message(FATAL_ERROR "Unknown PX4_COMPATIBILITY_PROFILE: ${PX4_COMPATIBILITY_PROFILE}")
+endif()
+configure_file(src/compatibility.hpp.in generated/compatibility.hpp @ONLY)
+file(WRITE "${CMAKE_CURRENT_BINARY_DIR}/compatibility_profile" "${PX4_COMPATIBILITY_PROFILE}\n")
+install(FILES "${CMAKE_CURRENT_BINARY_DIR}/compatibility_profile" DESTINATION share/${PROJECT_NAME})
+
 # Enable useful compiler warnings when compiling with GCC or Clang.
 # Warnings help us catch suspicious C++ without preventing the build.
 if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
@@ -43,6 +56,7 @@ set_target_properties(px4_interface_node_executable PROPERTIES
   OUTPUT_NAME px4_interface_node
 )
 target_compile_features(px4_interface_node_executable PUBLIC cxx_std_17)
+target_include_directories(px4_interface_node_executable PRIVATE "${CMAKE_CURRENT_BINARY_DIR}/generated")
 
 # Link the ordinary ROS 2 dependencies used by the C++ source file.
 ament_target_dependencies(px4_interface_node_executable
@@ -79,7 +93,11 @@ ament_export_dependencies(rosidl_default_runtime)
 
 if(BUILD_TESTING)
   find_package(launch_testing_ament_cmake REQUIRED)
-  add_launch_test(test/test_flight_mode.py TIMEOUT 120)
+  if(PX4_LEGACY_1_14_PASSIVE)
+    add_launch_test(test/test_legacy_telemetry.py TIMEOUT 90)
+  else()
+    add_launch_test(test/test_flight_mode.py TIMEOUT 120)
+  endif()
 endif()
 
 # Finish configuring this as an ament package.

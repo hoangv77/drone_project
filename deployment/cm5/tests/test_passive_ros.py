@@ -16,6 +16,7 @@ class PassiveLaunchTests(unittest.TestCase):
         from px4_interface_node.msg import DroneState
         from px4_interface_node.srv import ExecuteCommand, SetFlightMode
         from rclpy.qos import qos_profile_sensor_data
+        from safety_monitor.msg import SafetyStatus
         from state_machine_manager.msg import MissionState
         from std_srvs.srv import Trigger
 
@@ -24,10 +25,13 @@ class PassiveLaunchTests(unittest.TestCase):
         self.addCleanup(rclpy.shutdown)
         probe = rclpy.create_node('cm5_passive_test')
         self.addCleanup(probe.destroy_node)
-        mission, drone = [], []
+        mission, drone, safety = [], [], []
         probe.create_subscription(MissionState, '/drone/mission_state', mission.append, 10)
         probe.create_subscription(DroneState, '/drone/state', drone.append, qos_profile_sensor_data)
-        launch = subprocess.Popen(['ros2', 'launch', str(CM5 / 'launch/onboard.launch.py')],
+        probe.create_subscription(SafetyStatus, '/drone/safety_status', safety.append, qos_profile_sensor_data)
+        profile = os.environ['PX4_COMPATIBILITY_PROFILE']
+        launch = subprocess.Popen(['ros2', 'launch', str(CM5 / 'launch/onboard.launch.py'),
+                                   f'compatibility_profile:={profile}'],
                                   start_new_session=True)
 
         def stop():
@@ -47,6 +51,43 @@ class PassiveLaunchTests(unittest.TestCase):
         self.assertTrue(mission and drone)
         self.assertFalse(drone[-1].status_fresh)
         self.assertEqual(mission[-1].current_state, MissionState.STANDBY)
+
+        if profile == 'legacy_1_14_passive':
+            # Exercise the unchanged consumers with the actual legacy adapter.
+            from px4_msgs.msg import FailsafeFlags, SensorGps, VehicleLocalPosition, VehicleOdometry, VehicleStatus
+            types = {'vehicle_status': VehicleStatus, 'vehicle_local_position': VehicleLocalPosition,
+                     'vehicle_odometry': VehicleOdometry, 'vehicle_gps_position': SensorGps,
+                     'failsafe_flags': FailsafeFlags}
+            publishers = {name: probe.create_publisher(kind, '/fmu/out/' + name, qos_profile_sensor_data)
+                          for name, kind in types.items()}
+            messages = {name: kind() for name, kind in types.items()}
+            messages['vehicle_status'].system_id = messages['vehicle_status'].component_id = 1
+            messages['vehicle_status'].arming_state = VehicleStatus.ARMING_STATE_STANDBY
+            messages['vehicle_status'].pre_flight_checks_pass = True
+            messages['vehicle_status'].safety_off = True
+            local = messages['vehicle_local_position']
+            local.xy_valid = local.z_valid = local.v_xy_valid = local.v_z_valid = True
+            gps = messages['vehicle_gps_position']
+            gps.fix_type, gps.lat, gps.lon = 3, 410000000, -870000000
+            deadline = time.monotonic() + 8
+            while time.monotonic() < deadline:
+                for name, message in messages.items():
+                    message.timestamp = time.monotonic_ns() // 1000
+                    publishers[name].publish(message)
+                rclpy.spin_once(probe, timeout_sec=0.05)
+                if (drone[-1].status_fresh and drone[-1].position_valid and safety and
+                        safety[-1].preflight_passed):
+                    break
+            self.assertTrue(drone[-1].status_fresh and drone[-1].position_valid)
+            self.assertFalse(drone[-1].battery_fresh or drone[-1].land_detected_fresh)
+            self.assertTrue(safety[-1].preflight_passed)
+            self.assertEqual(safety[-1].phase, SafetyStatus.PHASE_UNKNOWN)
+            self.assertEqual(safety[-1].level, SafetyStatus.BLOCKED)
+            self.assertFalse(safety[-1].battery_healthy or safety[-1].landed or
+                             safety[-1].launch_permitted or safety[-1].autonomous_flight_permitted)
+            self.assertEqual(mission[-1].current_state, MissionState.STANDBY)
+            self.assertFalse(mission[-1].mission_active)
+            self.assertEqual(probe.count_publishers('/fmu/in/vehicle_command'), 0)
         self.assertFalse(mission[-1].mission_active)
         self.assertEqual(probe.count_publishers('/fmu/in/vehicle_command'), 0)
 

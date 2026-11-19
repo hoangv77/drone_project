@@ -466,6 +466,7 @@ class TestFlightMode(unittest.TestCase):
         self.gps_pub.publish(gps)
         self.until(lambda: self.states[-1].gps_valid and self.states[-1].gps_fresh)
         receiver.fix_type = 2
+        gps.timestamp = self.px4_time()
         self.gps_pub.publish(gps)
         self.until(lambda: not self.states[-1].gps_valid and self.states[-1].gps_fresh)
 

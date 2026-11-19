@@ -14,7 +14,8 @@ bool calibration_enabled
 uint8 system_id
 uint8 component_id
 
-# Land detection has its own source and freshness gate.
+# Land detection has its own source and freshness gate. landed=false with
+# land_detected_fresh=false means unknown, never confirmed airborne.
 bool landed
 bool land_detected_fresh
 
@@ -35,6 +36,7 @@ float32 vz
 
 bool gps_valid
 float32 battery_remaining
+# Missing/stale battery telemetry yields NaN and battery_fresh=false.
 
 bool status_fresh
 bool local_position_fresh

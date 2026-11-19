@@ -40,6 +40,9 @@ load_runtime_config() {
     set -a
     . "$file"
     set +a
+    case ${PX4_COMPATIBILITY_PROFILE:-} in modern_px4|legacy_1_14_passive) ;;
+        *) die "Set explicit PX4_COMPATIBILITY_PROFILE=modern_px4 or legacy_1_14_passive in $file." ;;
+    esac
     [[ ${ROS_DOMAIN_ID:-} =~ ^(0|[1-9][0-9]?)$ ]] || die "ROS_DOMAIN_ID must be 0–99."
     [[ -r /etc/drone/fastdds.xml ]] || die "Missing the Fast DDS loopback profile."
     export ROS_LOCALHOST_ONLY=1 RMW_IMPLEMENTATION=rmw_fastrtps_cpp

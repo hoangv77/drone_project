@@ -15,7 +15,7 @@ log() {
 }
 if [[ $# == 2 && $1 == --activate ]]; then
     candidate=$(realpath -e "$2")
-elif [[ $# == 3 ]]; then
+elif [[ $# == 4 ]]; then
     ref=$1
     [[ $ref != -* && -n $ref ]] || die "Supply an explicit commit or approved tag."
     repo=$(git -C "$here" rev-parse --show-toplevel)
@@ -23,7 +23,7 @@ elif [[ $# == 3 ]]; then
         die "Local changes detected. Commit or set them aside before updating."
     git -C "$repo" fetch --no-tags origin "$ref"
     commit=$(git -C "$repo" rev-parse 'FETCH_HEAD^{commit}')
-    log "build requested ref=$ref commit=$commit firmware=$3"
+    log "build requested ref=$ref commit=$commit firmware=$3 profile=$4"
     scratch=$(mktemp -d /opt/drone/releases/.update.XXXXXXXX)
     cleanup_source() {
         if [[ -f $scratch/source/.git ]]; then
@@ -34,7 +34,7 @@ elif [[ $# == 3 ]]; then
     }
     trap cleanup_source EXIT
     git -C "$repo" worktree add --detach "$scratch/source" "$commit"
-    if ! bash "$scratch/source/deployment/cm5/build.sh" "$2" "$3" | tee "$scratch/build.log"; then
+    if ! bash "$scratch/source/deployment/cm5/build.sh" "$2" "$3" "$4" | tee "$scratch/build.log"; then
         log "build failed commit=$commit; active release untouched"
         exit 1
     fi
@@ -42,7 +42,7 @@ elif [[ $# == 3 ]]; then
     cleanup_source
     trap - EXIT
 else
-    die "Usage: bash update.sh GIT_COMMIT_OR_TAG PX4_SOURCE_REPO FULL_PX4_COMMIT | --activate RELEASE"
+    die "Usage: bash update.sh GIT_COMMIT_OR_TAG PX4_SOURCE_REPO FULL_PX4_COMMIT PROFILE | --activate RELEASE"
 fi
 
 [[ $(dirname "$candidate") == /opt/drone/releases && -f $candidate/verified ]] ||
@@ -50,7 +50,8 @@ fi
 exec 9< /opt/drone
 flock -n 9 || die "Another install, build or update is running."
 scripts=$candidate/source/deployment/cm5
-bash "$scripts/verify.sh" build "$candidate"
+load_runtime_config
+bash "$scripts/verify.sh" build "$candidate" "$PX4_COMPATIBILITY_PROFILE"
 commit=$(cat "$candidate/commit")
 old=$(readlink "$state/current" || true)
 if [[ $old == "$candidate" ]]; then
@@ -109,7 +110,7 @@ stop_running
 point_current "$candidate"
 start_running
 if [[ " ${running[*]} " == *' drone-stack '* ]]; then
-    bash "$scripts/verify.sh" passive "$candidate"
+    bash "$scripts/verify.sh" passive "$candidate" "$PX4_COMPATIBILITY_PROFILE"
 fi
 if [[ " ${running[*]} " == *' drone-agent '* ]]; then
     systemctl is-active --quiet drone-agent
