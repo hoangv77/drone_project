@@ -2,3 +2,7 @@
 /build/
 /install/
 /log/
+/.cad-deps/
+/.cad-venv/
+/.phase6/
+__pycache__/

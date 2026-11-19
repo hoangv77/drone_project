@@ -49,6 +49,10 @@ if(BUILD_TESTING)
   ament_target_dependencies(test_safety_policy px4_interface_node)
   target_link_libraries(test_safety_policy "${cpp_typesupport_target}")
   find_package(launch_testing_ament_cmake REQUIRED)
-  add_launch_test(test/test_safety_pipeline.py TIMEOUT 120)
+  # This fixture drives modern raw DDS messages. Legacy raw telemetry is
+  # covered by px4_interface_node; normalized safety policy tests run for both.
+  if(NOT PX4_COMPATIBILITY_PROFILE STREQUAL "legacy_1_14_passive")
+    add_launch_test(test/test_safety_pipeline.py TIMEOUT 120)
+  endif()
 endif()
 ament_package()

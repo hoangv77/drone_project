@@ -10,6 +10,7 @@ import launch_testing.asserts
 import pytest
 import rclpy
 from rclpy.clock import Clock, ClockType
+from rclpy.impl.implementation_singleton import rclpy_implementation as _rclpy
 from px4_interface_node.msg import DroneState
 from safety_monitor.msg import SafetyStatus as S
 from state_machine_manager.msg import MissionState as M, StageFeedback as F
@@ -157,11 +158,25 @@ class TestMissionNode(unittest.TestCase):
     def test_00_missing_input_and_no_flight_control_endpoints(self):
         self.assertFalse(self.call('start').success)
         self.assertFalse(self.states['passive'][-1].safety_fresh)
-        self.until(lambda: {'mission_passive', 'mission_future'}.issubset(
-            self.node.get_node_names()))
-        for name in ['mission_passive', 'mission_future']:
-            publishers = self.node.get_publisher_names_and_types_by_node(name, '/')
-            clients = self.node.get_client_names_and_types_by_node(name, '/')
+        endpoints = {}
+
+        def discovered():
+            # Service discovery and node/endpoint graph discovery can complete
+            # at different times. Keep the endpoint assertions strict, but wait
+            # for both mission publishers to be visible before inspecting them.
+            try:
+                for name in ['mission_passive', 'mission_future']:
+                    publishers = self.node.get_publisher_names_and_types_by_node(name, '/')
+                    clients = self.node.get_client_names_and_types_by_node(name, '/')
+                    if not any(topic.endswith('/drone/mission_state') for topic, _ in publishers):
+                        return False
+                    endpoints[name] = (publishers, clients)
+            except _rclpy.NodeNameNonExistentError:
+                return False
+            return True
+
+        self.until(discovered)
+        for publishers, clients in endpoints.values():
             self.assertFalse(any('/fmu/in/' in topic for topic, _ in publishers))
             self.assertFalse(any('execute_command' in topic or 'set_flight_mode' in topic
                                  for topic, _ in clients))

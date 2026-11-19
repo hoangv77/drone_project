@@ -1,4 +1,5 @@
 set -eo pipefail
+export PX4_COMPATIBILITY_PROFILE=modern_px4
 root=/mnt/c/dev/drone_project
 release=/var/tmp/drone-phase7-ros-final/release
 px4=$HOME/PX4-Autopilot/build/px4_sitl_default
@@ -30,12 +31,12 @@ PX4_SYS_AUTOSTART=10040 PX4_SIM_MODEL=sihsim_quadx PX4_PARAM_UXRCE_DDS_DOM_ID=43
     PX4_UXRCE_DDS_PORT=28888 PX4_PARAM_UXRCE_DDS_PTCFG=1 \
     "$px4/bin/px4" -d "$px4/etc" >sitl.log 2>&1 &
 pids+=("$!")
-ros2 launch "$root/deployment/cm5/launch/onboard.launch.py" >stack.log 2>&1 &
+ros2 launch "$root/deployment/cm5/launch/onboard.launch.py" compatibility_profile:=modern_px4 >stack.log 2>&1 &
 pids+=("$!")
 sleep 12
-python3 "$root/deployment/cm5/health.py" sitl
+python3 "$root/deployment/cm5/health.py" sitl modern_px4
 kill -TERM "${pids[1]}"
-if python3 "$root/deployment/cm5/health.py" sitl; then
+if python3 "$root/deployment/cm5/health.py" sitl modern_px4; then
     echo 'Expected stale telemetry after stopping SITL'
     exit 1
 fi

@@ -37,6 +37,8 @@
 #include <string>
 #include <utility>
 
+#include "compatibility.hpp"
+
 class Px4InterfaceNode : public rclcpp::Node
 {
 public:
@@ -47,9 +49,17 @@ public:
         // a request. Source IDs must be reserved for this node on the vehicle.
         rcl_interfaces::msg::ParameterDescriptor startup_only;
         startup_only.read_only = true;
-        read_only_ = declare_parameter("read_only", false, startup_only);
+        const auto profile = declare_parameter<std::string>(
+            "compatibility_profile", px4_compatibility::profile, startup_only);
+        if (profile != px4_compatibility::profile) {
+            throw std::invalid_argument("Runtime compatibility_profile differs from compiled firmware contract");
+        }
+        // ignore_override makes the public parameter report the effective
+        // restriction, even when a launch/YAML/CLI override supplies false.
+        read_only_ = declare_parameter("read_only", px4_compatibility::passive,
+            startup_only, px4_compatibility::passive);
         const bool sitl_commands = declare_parameter("sitl_commands", false, startup_only);
-        if (sitl_commands && !read_only_) {
+        if (!px4_compatibility::passive && sitl_commands && !read_only_) {
             const auto * localhost = std::getenv("ROS_LOCALHOST_ONLY");
             const auto * domain = std::getenv("ROS_DOMAIN_ID");
             char * end = nullptr;
@@ -59,6 +69,9 @@ public:
                 throw std::invalid_argument("SITL commands require a dedicated localhost DDS domain");
             }
         }
+        const auto topic = [this, &startup_only](const char * name, const char * value) {
+            return declare_parameter<std::string>(std::string("topics.") + name, value, startup_only);
+        };
         const auto id_parameter = [this, &startup_only](const char * name, int value) {
             const auto id = declare_parameter<int>(name, value, startup_only);
             if (id < 1 || id > 255) {
@@ -82,13 +95,15 @@ public:
         transition_timeout_ = timeout_parameter(
             "transition_timeout_ms", static_cast<int>(legacy_timeout.count()));
 
-        land_subscription_ = create_subscription<px4_msgs::msg::VehicleLandDetected>(
-            "/fmu/out/vehicle_land_detected", rclcpp::SensorDataQoS(),
-            [this](px4_msgs::msg::VehicleLandDetected::SharedPtr msg) {
-                if (!accept_sample(msg->timestamp, last_land_timestamp_, last_land_rx_, status_timeout_)) {return;}
-                landed_ = msg->landed;
-                has_land_ = true;
-            });
+        if (!px4_compatibility::passive) {
+            land_subscription_ = create_subscription<px4_msgs::msg::VehicleLandDetected>(
+                topic("vehicle_land_detected", "/fmu/out/vehicle_land_detected"), rclcpp::SensorDataQoS(),
+                [this](px4_msgs::msg::VehicleLandDetected::SharedPtr msg) {
+                    if (!accept_sample(msg->timestamp, last_land_timestamp_, land_subscription_, last_land_rx_, status_timeout_)) {return;}
+                    landed_ = msg->landed;
+                    has_land_ = true;
+                });
+        }
 
         // PX4 telemetry uses best-effort sensor-data QoS. A subscriber with
         // incompatible reliable-only QoS might never receive these messages.
@@ -96,7 +111,7 @@ public:
 
         status_subscription_ =
             create_subscription<px4_msgs::msg::VehicleStatus>(
-                "/fmu/out/vehicle_status_v4",
+                topic("vehicle_status", px4_compatibility::status_topic),
                 px4_qos,
                 std::bind(
                     &Px4InterfaceNode::status_callback,
@@ -105,7 +120,7 @@ public:
 
         local_position_subscription_ =
             create_subscription<px4_msgs::msg::VehicleLocalPosition>(
-                "/fmu/out/vehicle_local_position_v1",
+                topic("vehicle_local_position", px4_compatibility::position_topic),
                 px4_qos,
                 std::bind(
                     &Px4InterfaceNode::local_position_callback,
@@ -114,7 +129,7 @@ public:
 
         odometry_subscription_ =
             create_subscription<px4_msgs::msg::VehicleOdometry>(
-                "/fmu/out/vehicle_odometry",
+                topic("vehicle_odometry", "/fmu/out/vehicle_odometry"),
                 px4_qos,
                 std::bind(
                     &Px4InterfaceNode::odometry_callback,
@@ -123,26 +138,28 @@ public:
 
         gps_subscription_ =
             create_subscription<GpsMessage>(
-                gps_topic(),
+                topic("gps", gps_topic()),
                 px4_qos,
                 std::bind(
                     &Px4InterfaceNode::gps_callback,
                     this,
                     std::placeholders::_1));
 
-        battery_subscription_ =
-            create_subscription<px4_msgs::msg::BatteryStatus>(
-                "/fmu/out/battery_status_v1",
-                px4_qos,
-                std::bind(
-                    &Px4InterfaceNode::battery_callback,
-                    this,
-                    std::placeholders::_1));
+        if (!px4_compatibility::passive) {
+            battery_subscription_ =
+                create_subscription<px4_msgs::msg::BatteryStatus>(
+                    topic("battery_status", "/fmu/out/battery_status_v1"),
+                    px4_qos,
+                    std::bind(
+                        &Px4InterfaceNode::battery_callback,
+                        this,
+                        std::placeholders::_1));
+        }
 
         failsafe_subscription_ = create_subscription<px4_msgs::msg::FailsafeFlags>(
-            "/fmu/out/failsafe_flags", px4_qos,
+            topic("failsafe_flags", "/fmu/out/failsafe_flags"), px4_qos,
             [this](px4_msgs::msg::FailsafeFlags::SharedPtr msg) {
-                if (!accept_sample(msg->timestamp, last_failsafe_timestamp_, last_failsafe_flags_rx_, slow_data_timeout_)) {return;}
+                if (!accept_sample(msg->timestamp, last_flags_timestamp_, failsafe_subscription_, last_failsafe_flags_rx_, slow_data_timeout_)) {return;}
                 failsafe_flags_ = *msg;
                 has_failsafe_flags_ = true;
             });
@@ -154,7 +171,7 @@ public:
                 "/drone/state",
                 rclcpp::QoS(10).reliable());
 
-        if (!read_only_ && sitl_commands) {
+        if (!px4_compatibility::passive && !read_only_ && sitl_commands) {
             safety_context_.subscription = subscribe_context(
                 "/drone/command_safety", "safety_monitor", safety_context_);
             mission_context_.subscription = subscribe_context(
@@ -162,7 +179,7 @@ public:
             command_publisher_ = create_publisher<px4_msgs::msg::VehicleCommand>(
                 "/fmu/in/vehicle_command", rclcpp::QoS(10).reliable());
             command_ack_subscription_ = create_subscription<px4_msgs::msg::VehicleCommandAck>(
-                "/fmu/out/vehicle_command_ack_v1", px4_qos,
+                topic("vehicle_command_ack", "/fmu/out/vehicle_command_ack_v1"), px4_qos,
                 std::bind(&Px4InterfaceNode::command_ack_callback, this, std::placeholders::_1));
             command_timer_ = create_wall_timer(
                 std::chrono::milliseconds(20),
@@ -206,8 +223,8 @@ public:
 
         RCLCPP_INFO(
             get_logger(),
-            "PX4 interface started; publishing /drone/state at 10 Hz; "
-            "command services %s.", command_publisher_ ? "enabled for isolated SITL" : "disabled");
+            "PX4 interface profile=%s; publishing /drone/state at 10 Hz; command services %s.",
+            px4_compatibility::profile, command_publisher_ ? "enabled" : "disabled (read-only)");
     }
 
 private:
@@ -368,7 +385,8 @@ private:
     GuardResult command_guard(
         uint8_t kind, const FlightMode * mode, const SteadyTimePoint & steady_now) const
     {
-        if (!is_fresh(has_status_, last_status_rx_, status_timeout_, steady_now)) {
+        if (status_subscription_->get_publisher_count() != 1 ||
+            !is_fresh(has_status_, last_status_rx_, status_timeout_, steady_now)) {
             return {CommandResponse::STATUS_UNAVAILABLE, "No fresh VehicleStatus from target PX4"};
         }
         if (kind == CommandRequest::SET_MODE && failsafe_ &&
@@ -390,7 +408,8 @@ private:
             }
         }
         if (kind == CommandRequest::ARM || kind == CommandRequest::DISARM) {
-            if (!is_fresh(has_land_, last_land_rx_, status_timeout_, steady_now)) {
+            if (!land_subscription_ || land_subscription_->get_publisher_count() != 1 ||
+                !is_fresh(has_land_, last_land_rx_, status_timeout_, steady_now)) {
                 return {CommandResponse::LANDED_UNAVAILABLE, "No fresh land-detection telemetry"};
             }
             if (!landed_) {
@@ -409,7 +428,8 @@ private:
         response.current_mode = flight_mode_;
         response.armed = armed_;
         response.status_fresh = is_fresh(
-            has_status_, last_status_rx_, status_timeout_, std::chrono::steady_clock::now());
+            has_status_ && status_subscription_->get_publisher_count() == 1,
+            last_status_rx_, status_timeout_, std::chrono::steady_clock::now());
         response.message = message;
         complete(response);
     }
@@ -502,13 +522,13 @@ private:
     void command_ack_callback(CommandAck::SharedPtr msg)
     {
         check_command();
-        if (!pending_command_ || pending_command_->response.accepted ||
+        if (!pending_command_ || command_ack_subscription_->get_publisher_count() != 1 ||
+            pending_command_->response.accepted ||
             msg->command != pending_command_->px4_command ||
             msg->target_system != source_system_ ||
             msg->target_component != source_component_ || msg->from_external ||
             msg->timestamp <= pending_command_->status_timestamp_at_request ||
             msg->timestamp <= last_ack_timestamp_ ||
-            command_ack_subscription_->get_publisher_count() != 1 ||
             msg->timestamp > system_time_us())
         {
             return;
@@ -550,8 +570,8 @@ private:
                 "Timed out waiting for terminal acknowledgment or confirmed state transition");
             return;
         }
-        if (!is_fresh(has_status_, last_status_rx_, status_timeout_, steady_now) ||
-            status_subscription_->get_publisher_count() != 1) {
+        if (status_subscription_->get_publisher_count() != 1 ||
+            !is_fresh(has_status_, last_status_rx_, status_timeout_, steady_now)) {
             finish_command(CommandResponse::STATUS_UNAVAILABLE, "VehicleStatus became stale during command");
             return;
         }
@@ -605,12 +625,20 @@ private:
         return has_received && (now - last_receive_time <= timeout);
     }
 
+    template<typename Subscription>
+    bool accept_sample(uint64_t timestamp, uint64_t & watermark, const Subscription & subscription,
+                       SteadyTimePoint & sample_time, std::chrono::milliseconds limit)
+    {
+        return subscription && subscription->get_publisher_count() == 1 &&
+            accept_sample(timestamp, watermark, sample_time, limit);
+    }
+
     void status_callback(px4_msgs::msg::VehicleStatus::SharedPtr msg)
     {
         if (msg->system_id != target_system_ || msg->component_id != target_component_) {
             return;
         }
-        if (!accept_sample(msg->timestamp, last_status_timestamp_, last_status_rx_, status_timeout_)) {return;}
+        if (!accept_sample(msg->timestamp, last_status_timestamp_, status_subscription_, last_status_rx_, status_timeout_)) {return;}
         armed_ =
             msg->arming_state ==
             px4_msgs::msg::VehicleStatus::ARMING_STATE_ARMED;
@@ -631,13 +659,14 @@ private:
     void local_position_callback(
         px4_msgs::msg::VehicleLocalPosition::SharedPtr msg)
     {
-        if (!accept_sample(msg->timestamp, last_local_position_timestamp_, last_local_position_rx_, fast_data_timeout_)) {return;}
+        if (!accept_sample(msg->timestamp, last_position_timestamp_, local_position_subscription_, last_local_position_rx_, fast_data_timeout_)) {return;}
         // These flags come from PX4's estimator. Freshness is added later in
         // publish_state() so estimator validity and communication validity stay
         // conceptually separate.
         position_valid_ = msg->xy_valid && msg->z_valid &&
             std::isfinite(msg->x) && std::isfinite(msg->y) && std::isfinite(msg->z);
-        velocity_valid_ = msg->v_xy_valid && msg->v_z_valid;
+        velocity_valid_ = msg->v_xy_valid && msg->v_z_valid &&
+            std::isfinite(msg->vx) && std::isfinite(msg->vy) && std::isfinite(msg->vz);
 
         // VehicleLocalPosition is our single source of translational state.
         // Coordinates use NED: x North, y East, and z Down.
@@ -653,7 +682,7 @@ private:
 
     void odometry_callback(px4_msgs::msg::VehicleOdometry::SharedPtr msg)
     {
-        if (!accept_sample(msg->timestamp, last_odometry_timestamp_, last_odometry_rx_, fast_data_timeout_)) {return;}
+        if (!accept_sample(msg->timestamp, last_odometry_timestamp_, odometry_subscription_, last_odometry_rx_, fast_data_timeout_)) {return;}
         // Odometry is monitored for availability but does not overwrite the
         // local-position cache. Its attitude can be exposed in a later message.
         has_odometry_ = true;
@@ -661,29 +690,17 @@ private:
 
     void gps_callback(GpsMessage::SharedPtr msg)
     {
-        if (!accept_sample(msg->timestamp, last_gps_timestamp_, last_gps_rx_, slow_data_timeout_)) {return;}
-        // A 3D or better fix plus finite coordinates is sufficient for this
-        // simplified GPS-valid signal. New PX4 firmware also reports whether
-        // the selected GNSS receiver passed its checks.
-#if __has_include(<px4_msgs/msg/sensor_gps.hpp>)
-        gps_valid_ =
-            msg->fix_type >= px4_msgs::msg::SensorGps::FIX_TYPE_3D &&
-            std::isfinite(msg->latitude_deg) &&
-            std::isfinite(msg->longitude_deg);
-#else
-        gps_valid_ =
-            msg->usable &&
-            msg->receiver.fix_type >= px4_msgs::msg::SensorGnss::FIX_TYPE_3D &&
-            std::isfinite(msg->receiver.latitude) &&
-            std::isfinite(msg->receiver.longitude);
-#endif
+        if (!accept_sample(msg->timestamp, last_gps_timestamp_, gps_subscription_, last_gps_rx_, slow_data_timeout_)) {return;}
+        // The profile adapter handles integer legacy coordinates and modern
+        // floating coordinates/receiver usability without callback version checks.
+        gps_valid_ = px4_compatibility::gps_valid(*msg);
 
         has_gps_ = true;
     }
 
     void battery_callback(px4_msgs::msg::BatteryStatus::SharedPtr msg)
     {
-        if (!accept_sample(msg->timestamp, last_battery_timestamp_, last_battery_rx_, slow_data_timeout_)) {return;}
+        if (!accept_sample(msg->timestamp, last_battery_timestamp_, battery_subscription_, last_battery_rx_, slow_data_timeout_)) {return;}
         const bool valid_remaining =
             msg->connected &&
             std::isfinite(msg->remaining) &&
@@ -704,18 +721,22 @@ private:
         const auto steady_now = std::chrono::steady_clock::now();
 
         const bool status_fresh = is_fresh(
-            has_status_, last_status_rx_, status_timeout_, steady_now) && status_subscription_->get_publisher_count() == 1;
+            has_status_ && status_subscription_->get_publisher_count() == 1,
+            last_status_rx_, status_timeout_, steady_now);
         const bool local_position_fresh = is_fresh(
-            has_local_position_,
+            has_local_position_ && local_position_subscription_->get_publisher_count() == 1,
             last_local_position_rx_,
             fast_data_timeout_,
-            steady_now) && local_position_subscription_->get_publisher_count() == 1;
+            steady_now);
         const bool odometry_fresh = is_fresh(
-            has_odometry_, last_odometry_rx_, fast_data_timeout_, steady_now) && odometry_subscription_->get_publisher_count() == 1;
+            has_odometry_ && odometry_subscription_->get_publisher_count() == 1,
+            last_odometry_rx_, fast_data_timeout_, steady_now);
         const bool gps_fresh = is_fresh(
-            has_gps_, last_gps_rx_, slow_data_timeout_, steady_now) && gps_subscription_->get_publisher_count() == 1;
+            has_gps_ && gps_subscription_->get_publisher_count() == 1,
+            last_gps_rx_, slow_data_timeout_, steady_now);
         const bool battery_fresh = is_fresh(
-            has_battery_, last_battery_rx_, slow_data_timeout_, steady_now) && battery_subscription_->get_publisher_count() == 1;
+            has_battery_ && battery_subscription_ && battery_subscription_->get_publisher_count() == 1,
+            last_battery_rx_, slow_data_timeout_, steady_now);
 
         // Construct one clean snapshot from the most recent cached inputs.
         px4_interface_node::msg::DroneState state;
@@ -736,12 +757,13 @@ private:
         state.system_id = has_status_ ? target_system_ : 0;
         state.component_id = has_status_ ? target_component_ : 0;
         state.landed = landed_;
-        state.land_detected_fresh = is_fresh(has_land_, last_land_rx_, status_timeout_, steady_now) && land_subscription_->get_publisher_count() == 1;
+        state.land_detected_fresh = is_fresh(has_land_ && land_subscription_ &&
+            land_subscription_->get_publisher_count() == 1, last_land_rx_, status_timeout_, steady_now);
         const auto arm_guard = command_guard(CommandRequest::ARM, nullptr, steady_now);
-        state.ready_to_arm = status_fresh && state.land_detected_fresh && !armed_ && !pending_command_ &&
-            arm_guard.result == CommandResponse::SUCCESS;
-        state.arming_block_reason = armed_ ? "Already armed" :
-            (pending_command_ ? "Another command is pending" : arm_guard.message);
+        state.ready_to_arm = command_publisher_ && status_fresh && state.land_detected_fresh &&
+            !armed_ && !pending_command_ && arm_guard.result == CommandResponse::SUCCESS;
+        state.arming_block_reason = !command_publisher_ ? "PX4 interface is read-only" : (armed_ ? "Already armed" :
+            (pending_command_ ? "Another command is pending" : arm_guard.message));
         state.command_pending = pending_command_ != nullptr;
 
         // Position is declared valid only when both PX4's estimator says it is
@@ -754,12 +776,12 @@ private:
         // DroneState currently has no separate velocity-valid field, so publish
         // NaN when PX4 reports invalid velocity. Freshness remains explicit.
         const float unknown = std::numeric_limits<float>::quiet_NaN();
-        state.vx = velocity_valid_ ? vx_ : unknown;
-        state.vy = velocity_valid_ ? vy_ : unknown;
-        state.vz = velocity_valid_ ? vz_ : unknown;
+        state.vx = velocity_valid_ && local_position_fresh ? vx_ : unknown;
+        state.vy = velocity_valid_ && local_position_fresh ? vy_ : unknown;
+        state.vz = velocity_valid_ && local_position_fresh ? vz_ : unknown;
 
         state.gps_valid = gps_valid_ && gps_fresh;
-        state.battery_remaining = battery_remaining_;
+        state.battery_remaining = battery_fresh ? battery_remaining_ : unknown;
 
         state.status_fresh = status_fresh;
         state.local_position_fresh = local_position_fresh;
@@ -768,7 +790,8 @@ private:
         state.battery_fresh = battery_fresh;
 
         state.failsafe_flags_fresh = is_fresh(
-            has_failsafe_flags_, last_failsafe_flags_rx_, slow_data_timeout_, steady_now) && failsafe_subscription_->get_publisher_count() == 1;
+            has_failsafe_flags_ && failsafe_subscription_->get_publisher_count() == 1,
+            last_failsafe_flags_rx_, slow_data_timeout_, steady_now);
         state.manual_control_signal_lost = failsafe_flags_.manual_control_signal_lost;
         state.offboard_control_signal_lost = failsafe_flags_.offboard_control_signal_lost;
         state.local_position_invalid = failsafe_flags_.local_position_invalid;
@@ -780,7 +803,7 @@ private:
         state.critical_failure = failsafe_flags_.angular_velocity_invalid ||
             failsafe_flags_.attitude_invalid || failsafe_flags_.fd_critical_failure ||
             failsafe_flags_.fd_esc_arming_failure || failsafe_flags_.fd_motor_failure;
-        state.geofence_breached = failsafe_flags_.geofence_breached;
+        state.geofence_breached = px4_compatibility::geofence_breached(failsafe_flags_);
         state.mission_failure = failsafe_flags_.mission_failure;
         // Preserve both sources. The consumer evaluates each warning explicitly;
         // CHARGING (7) is not a more severe low-battery alarm.
@@ -828,9 +851,14 @@ private:
     uint8_t source_component_{191};
     std::chrono::milliseconds ack_timeout_{2000};
     std::chrono::milliseconds transition_timeout_{5000};
-    uint64_t last_status_timestamp_{0}, last_land_timestamp_{0}, last_failsafe_timestamp_{0};
-    uint64_t last_local_position_timestamp_{0}, last_odometry_timestamp_{0};
-    uint64_t last_gps_timestamp_{0}, last_battery_timestamp_{0}, last_ack_timestamp_{0};
+    uint64_t last_status_timestamp_{0};
+    uint64_t last_position_timestamp_{0};
+    uint64_t last_odometry_timestamp_{0};
+    uint64_t last_gps_timestamp_{0};
+    uint64_t last_battery_timestamp_{0};
+    uint64_t last_land_timestamp_{0};
+    uint64_t last_flags_timestamp_{0};
+    uint64_t last_ack_timestamp_{0};
 
     // Cached normalized values. NaN means no valid measurement is known yet.
     bool armed_{false};

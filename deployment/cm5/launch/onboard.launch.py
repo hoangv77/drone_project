@@ -19,7 +19,8 @@ def generate_launch_description():
     mission = Path(get_package_share_directory('state_machine_manager'))
     nodes = [
         Node(package='px4_interface_node', executable='px4_interface_node', output='screen',
-             parameters=[{'read_only': True, 'use_sim_time': False}]),
+             parameters=[{'read_only': True, 'sitl_commands': False, 'use_sim_time': False,
+                          'compatibility_profile': LaunchConfiguration('compatibility_profile')}]),
         Node(package='safety_monitor', executable='safety_monitor', output='screen',
              parameters=[LaunchConfiguration('safety_config'),
                          {'use_sim_time': False, 'publish_command_safety': False}]),
@@ -81,6 +82,7 @@ def generate_launch_description():
         ]
 
     return LaunchDescription([
+        DeclareLaunchArgument('compatibility_profile', choices=['modern_px4', 'legacy_1_14_passive']),
         DeclareLaunchArgument('safety_config', default_value=str(safety / 'config/safety_monitor.yaml')),
         DeclareLaunchArgument('mission_config', default_value=str(mission / 'config/mission.yaml')),
         OpaqueFunction(function=start),

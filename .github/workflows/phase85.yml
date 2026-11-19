@@ -40,12 +40,12 @@ jobs:
           report=$RUNNER_TEMP/phase85-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}
           mkdir -p "$report"
           source /opt/ros/humble/setup.bash
-          export ROS_LOCALHOST_ONLY=1 ROS_DOMAIN_ID=84 GZ_PARTITION=phase85-ci
-          python3 deployment/cm5/schema.py prepare "$report" "$PX4_ROOT" 97a3c7f01793e2b0b9e5a30425b8e88e69741f27
+          export ROS_LOCALHOST_ONLY=1 ROS_DOMAIN_ID=84 GZ_PARTITION=phase85-ci PX4_COMPATIBILITY_PROFILE=modern_px4
+          python3 deployment/cm5/schema.py prepare "$report" "$PX4_ROOT" 97a3c7f01793e2b0b9e5a30425b8e88e69741f27 --profile modern_px4
           cd "$report"
           paths=("$report/px4_msgs" "$repo/drone_project/px4_interface_node" "$repo/drone_project/safety_monitor"
                  "$repo/drone_project/state_machine_manager" "$repo/drone_project/vision")
-          colcon build --merge-install --base-paths "${paths[@]}"
+          colcon build --merge-install --base-paths "${paths[@]}" --cmake-args -DPX4_COMPATIBILITY_PROFILE=modern_px4
           colcon test --merge-install --base-paths "${paths[@]}" --packages-select px4_interface_node safety_monitor state_machine_manager
           colcon test-result --verbose
           source install/local_setup.bash
